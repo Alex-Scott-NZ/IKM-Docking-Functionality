@@ -36,3 +36,4 @@ obj
 
 # Styles Generated Code
 *.scss.ts
+tools/browser-harness/*.png

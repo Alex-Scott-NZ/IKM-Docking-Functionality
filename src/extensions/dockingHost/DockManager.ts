@@ -14,8 +14,13 @@ const STYLE_ID = 'ikm-dock-styles';
 const ROOT_ID = 'ikm-dock-host';
 /** Rendered by the footer extension when present; the bottom zone portals in (later phase). */
 const FOOTER_SLOT_ID = 'ikm-dock-bottom-slot';
-/** Show the built-in back-to-top only after this much scroll (in viewport heights). */
-const BACK_TO_TOP_THRESHOLD_VH = 1.5;
+/**
+ * Show the built-in back-to-top after this much scroll. Capped in pixels:
+ * a threshold expressed purely in viewport heights can exceed a page's
+ * maximum scrollable distance on large windows (content height minus one
+ * viewport), making the chip unreachable.
+ */
+const BACK_TO_TOP_MIN_SCROLL_PX = 400;
 const FALLBACK_PRIMARY = '#085a64';
 
 interface IRegistered {
@@ -270,7 +275,7 @@ export class DockManager {
       const top = this._scrollRegion instanceof Window
         ? window.scrollY
         : (this._scrollRegion ? this._scrollRegion.scrollTop : 0);
-      this._setBackToTopScrolled(top > window.innerHeight * BACK_TO_TOP_THRESHOLD_VH);
+      this._setBackToTopScrolled(top > Math.min(window.innerHeight * 0.75, BACK_TO_TOP_MIN_SCROLL_PX));
     });
   }
 
