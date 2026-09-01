@@ -310,25 +310,28 @@ export class DockManager {
   }
 
   /**
-   * Keep the bottom-right zone just left of the feedback pill (async-mounted,
-   * variable width, session-dismissible) and clear of the scrollbar. Falls
-   * back to the base 20px offset when no feedback pill is on the page.
+   * The host RESERVES the rightmost slot of the bottom row (just clear of
+   * the scrollbar) — back-to-top's priority-10 spot. The legacy feedback
+   * pill positions itself at right:45px, which would overlap the reserved
+   * slot, so as corner arbiter the host nudges it left to sit beside the
+   * zone. Re-applied every tick: the pill mounts async and React re-renders
+   * can wipe the inline style. Goes away once feedback registers properly.
    */
   private _updateBottomRowOffset(): void {
     const zone = this._zones['bottom-right'];
     if (!zone) { return; }
-    let offset = 20;
+    const zRect = zone.getBoundingClientRect();
+    if (zRect.width === 0) { return; }
+    const clearRight = Math.round(window.innerWidth - zRect.left + 8);
     const candidates = document.querySelectorAll('[class*="eedback"]');
     for (let i = 0; i < candidates.length; i++) {
       const el = candidates[i] as HTMLElement;
-      const cs = window.getComputedStyle(el);
-      if (cs.position !== 'fixed') { continue; }
+      if (window.getComputedStyle(el).position !== 'fixed') { continue; }
       const r = el.getBoundingClientRect();
       if (r.width === 0 || r.bottom < window.innerHeight - 60) { continue; }
-      offset = Math.max(offset, window.innerWidth - r.left + 8);
+      const px = `${clearRight}px`;
+      if (el.style.right !== px) { el.style.right = px; }
     }
-    const px = `${Math.round(offset)}px`;
-    if (zone.style.right !== px) { zone.style.right = px; }
   }
 
   private _setBackToTopScrolled(past: boolean): void {
@@ -396,9 +399,8 @@ export class DockManager {
 }
 .ikm-dock-chip { border-radius: 999px; padding: 6px 14px; }
 .ikm-dock-chip.ikm-dock-backtotop {
-  width: 40px; height: 40px; padding: 0; border-radius: 50%; border: 0;
-  justify-content: center;
-  box-shadow: 0 2px 4px rgba(135,135,135,.5);
+  width: 40px; height: 30px; padding: 0; border-radius: 0; border: 0;
+  justify-content: center; box-shadow: none;
 }
 .ikm-dock-chip.ikm-dock-backtotop .ikm-dock-label { display: none; }
 .ikm-dock-chip.ikm-dock-backtotop .ikm-dock-icon { font-size: 16px; }
