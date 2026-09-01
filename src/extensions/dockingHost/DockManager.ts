@@ -348,11 +348,14 @@ export class DockManager {
     const style = document.createElement('style');
     style.id = STYLE_ID;
     style.textContent = `
-#${ROOT_ID} { --ikm-dock-primary: ${this._themePrimary}; }
-#${ROOT_ID}[hidden] { display: none !important; }
-.ikm-dock-zone-bottom { position: fixed; bottom: 0; z-index: ${DOCK_Z_INDEX}; display: flex; gap: 8px; align-items: flex-end; }
-.ikm-dock-zone-bottom.ikm-dock-left { left: 0; }
-.ikm-dock-zone-bottom.ikm-dock-right { right: 0; flex-direction: row-reverse; }
+#${ROOT_ID}, .ikm-dock-bottom-host { --ikm-dock-primary: ${this._themePrimary}; }
+#${ROOT_ID}[hidden], .ikm-dock-zone-bottom[hidden], .ikm-dock-zone-edge[hidden] { display: none !important; }
+/* 20px in from the edge / 35px up: clear of the scroll region's scrollbar and
+   the feedback pill — the same placement the community ScrollToTop's circle
+   variant used for exactly this reason. */
+.ikm-dock-zone-bottom { position: fixed; bottom: 35px; z-index: ${DOCK_Z_INDEX}; display: flex; gap: 8px; align-items: flex-end; }
+.ikm-dock-zone-bottom.ikm-dock-left { left: 20px; }
+.ikm-dock-zone-bottom.ikm-dock-right { right: 20px; flex-direction: row-reverse; }
 .ikm-dock-zone-edge { position: fixed; top: 25%; z-index: ${DOCK_Z_INDEX}; display: flex; flex-direction: column; gap: 8px; }
 .ikm-dock-zone-edge.ikm-dock-left { left: 0; }
 .ikm-dock-zone-edge.ikm-dock-right { right: 0; }
@@ -366,11 +369,12 @@ export class DockManager {
 }
 .ikm-dock-chip { border-radius: 999px; padding: 6px 14px; }
 .ikm-dock-chip.ikm-dock-backtotop {
-  width: 40px; height: 30px; padding: 0; border-radius: 0; border: 0;
-  justify-content: center; box-shadow: none;
+  width: 40px; height: 40px; padding: 0; border-radius: 50%; border: 0;
+  justify-content: center;
+  box-shadow: 0 2px 4px rgba(135,135,135,.5);
 }
 .ikm-dock-chip.ikm-dock-backtotop .ikm-dock-label { display: none; }
-.ikm-dock-chip.ikm-dock-backtotop .ikm-dock-icon { font-size: 14px; }
+.ikm-dock-chip.ikm-dock-backtotop .ikm-dock-icon { font-size: 16px; }
 .ikm-dock-tab { writing-mode: vertical-rl; padding: 12px 6px; letter-spacing: 0.06em; }
 .ikm-dock-zone-edge.ikm-dock-left .ikm-dock-tab { border-radius: 0 6px 6px 0; }
 .ikm-dock-zone-edge.ikm-dock-right .ikm-dock-tab { border-radius: 6px 0 0 6px; }
