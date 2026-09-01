@@ -62,6 +62,9 @@ export class DockManager {
     // Capture phase: modern SP scrolls a nested region, not the window,
     // and scroll events don't bubble — capture is the only reliable hook.
     document.addEventListener('scroll', this._onScrollCapture, true);
+    // The feedback button mounts async (dynamic import) — re-measure the
+    // bottom row a few times after start, then keep it fresh on scroll ticks.
+    [500, 1500, 4000].forEach((ms) => window.setTimeout(() => this._updateBottomRowOffset(), ms));
     this._log('started');
   }
 
@@ -302,7 +305,30 @@ export class DockManager {
         ? window.scrollY
         : (this._scrollRegion ? this._scrollRegion.scrollTop : 0);
       this._setBackToTopScrolled(top > Math.min(window.innerHeight * 0.75, BACK_TO_TOP_MIN_SCROLL_PX));
+      this._updateBottomRowOffset();
     });
+  }
+
+  /**
+   * Keep the bottom-right zone just left of the feedback pill (async-mounted,
+   * variable width, session-dismissible) and clear of the scrollbar. Falls
+   * back to the base 20px offset when no feedback pill is on the page.
+   */
+  private _updateBottomRowOffset(): void {
+    const zone = this._zones['bottom-right'];
+    if (!zone) { return; }
+    let offset = 20;
+    const candidates = document.querySelectorAll('[class*="eedback"]');
+    for (let i = 0; i < candidates.length; i++) {
+      const el = candidates[i] as HTMLElement;
+      const cs = window.getComputedStyle(el);
+      if (cs.position !== 'fixed') { continue; }
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.bottom < window.innerHeight - 60) { continue; }
+      offset = Math.max(offset, window.innerWidth - r.left + 8);
+    }
+    const px = `${Math.round(offset)}px`;
+    if (zone.style.right !== px) { zone.style.right = px; }
   }
 
   private _setBackToTopScrolled(past: boolean): void {
@@ -350,10 +376,11 @@ export class DockManager {
     style.textContent = `
 #${ROOT_ID}, .ikm-dock-bottom-host { --ikm-dock-primary: ${this._themePrimary}; }
 #${ROOT_ID}[hidden], .ikm-dock-zone-bottom[hidden], .ikm-dock-zone-edge[hidden] { display: none !important; }
-/* 20px in from the edge / 35px up: clear of the scroll region's scrollbar and
-   the feedback pill — the same placement the community ScrollToTop's circle
-   variant used for exactly this reason. */
-.ikm-dock-zone-bottom { position: fixed; bottom: 35px; z-index: ${DOCK_Z_INDEX}; display: flex; gap: 8px; align-items: flex-end; }
+/* The dock's bottom row: chips line up along the very bottom of the page in
+   the same strip as the feedback pill. The right zone's offset is adjusted at
+   runtime to sit just left of the feedback pill (its width varies with the
+   label) and never under the scroll region's scrollbar. */
+.ikm-dock-zone-bottom { position: fixed; bottom: 2px; z-index: ${DOCK_Z_INDEX}; display: flex; gap: 8px; align-items: center; }
 .ikm-dock-zone-bottom.ikm-dock-left { left: 20px; }
 .ikm-dock-zone-bottom.ikm-dock-right { right: 20px; flex-direction: row-reverse; }
 .ikm-dock-zone-edge { position: fixed; top: 25%; z-index: ${DOCK_Z_INDEX}; display: flex; flex-direction: column; gap: 8px; }
