@@ -4,6 +4,6 @@
         Title="DockingHost"
         Location="ClientSideExtension.ApplicationCustomizer"
         ComponentId="5ccdd637-e7e2-4025-a0af-cc8a1751307a"
-        Properties="{&quot;testMessage&quot;:&quot;Test message&quot;}">
+        Properties="{&quot;enabled&quot;:true,&quot;debug&quot;:false}">
     </ClientSideComponentInstance>
 </Elements>
