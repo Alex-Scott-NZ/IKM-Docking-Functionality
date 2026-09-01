@@ -1,5 +1,9 @@
 import { Log } from '@microsoft/sp-core-library';
-import { BaseApplicationCustomizer } from '@microsoft/sp-application-base';
+import {
+  BaseApplicationCustomizer,
+  PlaceholderName,
+  PlaceholderContent
+} from '@microsoft/sp-application-base';
 import { ThemeProvider, IReadonlyTheme } from '@microsoft/sp-component-base';
 
 import { IDockingHostProperties } from './contract';
@@ -16,6 +20,7 @@ export default class DockingHostApplicationCustomizer
   extends BaseApplicationCustomizer<IDockingHostProperties> {
 
   private _manager: DockManager | undefined;
+  private _bottomPlaceholder: PlaceholderContent | undefined;
 
   public async onInit(): Promise<void> {
     const props: IDockingHostProperties = this.properties || {};
@@ -42,7 +47,16 @@ export default class DockingHostApplicationCustomizer
       Log.info(LOG_SOURCE, `Theme unavailable, using fallback: ${e}`);
     }
 
-    this._manager = new DockManager(props, themePrimary);
+    // The bottom dock zone lives in the SPFx-reserved Bottom placeholder,
+    // alongside the other bottom-of-page extensions (feedback, the community
+    // scroll-to-top) — not loose on document.body. Edge zones have no
+    // placeholder equivalent and stay body-mounted.
+    this._bottomPlaceholder = this.context.placeholderProvider.tryCreateContent(
+      PlaceholderName.Bottom,
+      { onDispose: () => { /* manager dispose handles DOM */ } }
+    );
+
+    this._manager = new DockManager(props, themePrimary, this._bottomPlaceholder?.domElement);
     this._manager.start();
     this._applyEditModeVisibility();
 

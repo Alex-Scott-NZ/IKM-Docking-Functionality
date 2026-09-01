@@ -46,9 +46,12 @@ export class DockManager {
 
   private _onScrollCapture = (e: Event): void => this._handleScroll(e);
 
-  public constructor(props: IDockingHostProperties, themePrimary?: string) {
+  private _bottomHost: HTMLElement | undefined;
+
+  public constructor(props: IDockingHostProperties, themePrimary?: string, bottomHost?: HTMLElement) {
     this._props = props;
     this._themePrimary = themePrimary || FALLBACK_PRIMARY;
+    this._bottomHost = bottomHost;
   }
 
   public start(): void {
@@ -71,6 +74,7 @@ export class DockManager {
     if ((window as unknown as { ikmDock?: IIkmDock }).ikmDock) {
       delete (window as unknown as { ikmDock?: IIkmDock }).ikmDock;
     }
+    Object.keys(this._zones).forEach((z) => this._zones[z]?.remove());
     this._root?.remove();
     document.getElementById(STYLE_ID)?.remove();
     this._registered.clear();
@@ -82,6 +86,10 @@ export class DockManager {
     if (this._root) {
       this._root.hidden = hidden;
     }
+    // Bottom zones may live in the placeholder, outside _root.
+    ['bottom-left', 'bottom-right'].forEach((z) => {
+      if (this._zones[z]) { this._zones[z].hidden = hidden; }
+    });
   }
 
   // ---------------------------------------------------------------- API
@@ -154,16 +162,21 @@ export class DockManager {
   private _buildZones(): void {
     const root = document.createElement('div');
     root.id = ROOT_ID;
-    const mk = (cls: string): HTMLElement => {
+    const mk = (cls: string, parent: HTMLElement): HTMLElement => {
       const el = document.createElement('div');
       el.className = cls;
-      root.appendChild(el);
+      parent.appendChild(el);
       return el;
     };
-    this._zones['bottom-left'] = mk('ikm-dock-zone-bottom ikm-dock-left');
-    this._zones['bottom-right'] = mk('ikm-dock-zone-bottom ikm-dock-right');
-    this._zones['edge-left'] = mk('ikm-dock-zone-edge ikm-dock-left');
-    this._zones['edge-right'] = mk('ikm-dock-zone-edge ikm-dock-right');
+    // Bottom zones render inside the SPFx Bottom placeholder when available
+    // (the reserved bottom-of-page slot the other extensions use); the CSS is
+    // position: fixed either way, so visuals don't depend on the parent.
+    const bottomParent = this._bottomHost || root;
+    if (this._bottomHost) { this._bottomHost.classList.add('ikm-dock-bottom-host'); }
+    this._zones['bottom-left'] = mk('ikm-dock-zone-bottom ikm-dock-left', bottomParent);
+    this._zones['bottom-right'] = mk('ikm-dock-zone-bottom ikm-dock-right', bottomParent);
+    this._zones['edge-left'] = mk('ikm-dock-zone-edge ikm-dock-left', root);
+    this._zones['edge-right'] = mk('ikm-dock-zone-edge ikm-dock-right', root);
     document.body.appendChild(root);
     this._root = root;
   }
@@ -192,6 +205,12 @@ export class DockManager {
     const el = document.createElement('button');
     el.type = 'button';
     el.className = isEdge ? 'ikm-dock-tab' : 'ikm-dock-chip';
+    if (entry.descriptor.id === 'back-to-top' && !isEdge) {
+      // Visual continuity with the community ScrollToTop button users know:
+      // same 40x30 theme-primary square, icon-only (label stays for AT).
+      el.classList.add('ikm-dock-backtotop');
+      el.setAttribute('title', 'Back to top');
+    }
     el.setAttribute('data-ikm-dock-id', entry.descriptor.id);
     el.setAttribute('aria-label', entry.descriptor.label);
 
@@ -237,6 +256,13 @@ export class DockManager {
         externalBackToTop = true;
       }
     });
+    // Transitional deference: while the legacy community ScrollToTop
+    // customizer is on the page, it IS the page's back-to-top — the host's
+    // built-in only takes over once that extension is retired per-site.
+    // (Hashed SCSS-module class, matched by substring.)
+    if (!externalBackToTop && document.querySelector('[class*="spfxScrolltotopBtn"]')) {
+      externalBackToTop = true;
+    }
     const builtIn = this._registered.get('back-to-top');
     if (builtIn && builtIn.element) {
       builtIn.element.classList.toggle('ikm-dock-suppressed', externalBackToTop);
@@ -290,7 +316,10 @@ export class DockManager {
   private _updateBackToTopVisibility(): void {
     const entry = this._registered.get('back-to-top');
     if (!entry || !entry.element) { return; }
-    const suppressed = entry.element.classList.contains('ikm-dock-suppressed');
+    // Re-check the legacy button on every tick: extensions mount in any
+    // order, so it may appear well after the host registered its chip.
+    const legacyPresent = !!document.querySelector('[class*="spfxScrolltotopBtn"]');
+    const suppressed = entry.element.classList.contains('ikm-dock-suppressed') || legacyPresent;
     entry.element.classList.toggle('ikm-dock-offstage', !this._pastScrollThreshold || suppressed);
   }
 
@@ -321,9 +350,9 @@ export class DockManager {
     style.textContent = `
 #${ROOT_ID} { --ikm-dock-primary: ${this._themePrimary}; }
 #${ROOT_ID}[hidden] { display: none !important; }
-.ikm-dock-zone-bottom { position: fixed; bottom: 10px; z-index: ${DOCK_Z_INDEX}; display: flex; gap: 8px; align-items: center; }
-.ikm-dock-zone-bottom.ikm-dock-left { left: 16px; }
-.ikm-dock-zone-bottom.ikm-dock-right { right: 16px; }
+.ikm-dock-zone-bottom { position: fixed; bottom: 0; z-index: ${DOCK_Z_INDEX}; display: flex; gap: 8px; align-items: flex-end; }
+.ikm-dock-zone-bottom.ikm-dock-left { left: 0; }
+.ikm-dock-zone-bottom.ikm-dock-right { right: 0; flex-direction: row-reverse; }
 .ikm-dock-zone-edge { position: fixed; top: 25%; z-index: ${DOCK_Z_INDEX}; display: flex; flex-direction: column; gap: 8px; }
 .ikm-dock-zone-edge.ikm-dock-left { left: 0; }
 .ikm-dock-zone-edge.ikm-dock-right { right: 0; }
@@ -336,6 +365,12 @@ export class DockManager {
   transition: transform 120ms ease, opacity 120ms ease;
 }
 .ikm-dock-chip { border-radius: 999px; padding: 6px 14px; }
+.ikm-dock-chip.ikm-dock-backtotop {
+  width: 40px; height: 30px; padding: 0; border-radius: 0; border: 0;
+  justify-content: center; box-shadow: none;
+}
+.ikm-dock-chip.ikm-dock-backtotop .ikm-dock-label { display: none; }
+.ikm-dock-chip.ikm-dock-backtotop .ikm-dock-icon { font-size: 14px; }
 .ikm-dock-tab { writing-mode: vertical-rl; padding: 12px 6px; letter-spacing: 0.06em; }
 .ikm-dock-zone-edge.ikm-dock-left .ikm-dock-tab { border-radius: 0 6px 6px 0; }
 .ikm-dock-zone-edge.ikm-dock-right .ikm-dock-tab { border-radius: 6px 0 0 6px; }
