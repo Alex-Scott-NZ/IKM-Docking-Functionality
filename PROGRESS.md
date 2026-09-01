@@ -1,6 +1,26 @@
 # Docking Functionality — Progress (NWR-39932)
 
-*Status as at 2026-09-02.*
+*Status as at 2026-09-02 (afternoon update below).*
+
+## Update — first two utilities live on the dev tenant
+
+- **Docking Host deployed tenant-wide** (`IKM-Docking-Host-Extension`
+  v0.1.0.3): registration API (`window.ikmDock`), dock bottom row in the
+  SPFx Bottom placeholder, built-in **back-to-top** as the familiar square
+  button reserving the row's rightmost slot (clear of the scrollbar), legacy
+  feedback pill nudged into line, edit-mode/mobile hiding, theme-aware.
+- **Feedback minimise-to-dock shipped** (`IKM-Feedback-Extension` v0.0.0.15):
+  the old unrecoverable session-kill X is now a minimise — pill docks to a
+  "Feedback" chip beside back-to-top, chip click restores; per-user choice in
+  localStorage; legacy behaviour preserved where the host is absent.
+- **Community ScrollToTop disabled** on the tenant (Tenant Wide Extensions
+  item 21, `TenantWideExtensionDisabled=true` — flip back to restore). The
+  host defers to it wherever it's still enabled.
+- **Docking-Playground.aspx** (dpex-testing) is the live test page; verified
+  end-to-end with the CDP browser harness.
+- Still to come: admin "Docking & Utilities" section (edits the host's
+  tenant-wide row — currently running on built-in defaults), TOC minimise +
+  `provides` registration, edge-tab targets, footer sticky/slot phase.
 
 ## What this is
 
