@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Elements xmlns="http://schemas.microsoft.com/sharepoint/">
+    <CustomAction
+        Title="DockingHost"
+        Location="ClientSideExtension.ApplicationCustomizer"
+        ClientSideComponentId="5ccdd637-e7e2-4025-a0af-cc8a1751307a"
+        ClientSideComponentProperties="{&quot;testMessage&quot;:&quot;Test message&quot;}">
+    </CustomAction>
+</Elements>

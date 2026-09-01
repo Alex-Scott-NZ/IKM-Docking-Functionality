@@ -1,0 +1,39 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/spfx-build/spfx-serve.schema.json",
+  "port": 4321,
+  "https": true,
+  "serveConfigurations": {
+    "default": {
+      "pageUrl": "https://5pbdxb.sharepoint.com/sites/dpex-testing/SitePages/Docking-Playground.aspx",
+      "customActions": {
+        "5ccdd637-e7e2-4025-a0af-cc8a1751307a": {
+          "location": "ClientSideExtension.ApplicationCustomizer",
+          "properties": {
+            "enabled": true,
+            "debug": true
+          }
+        }
+      }
+    },
+    "dockingHost": {
+      "pageUrl": "https://5pbdxb.sharepoint.com/sites/dpex-testing/SitePages/Docking-Playground.aspx",
+      "customActions": {
+        "5ccdd637-e7e2-4025-a0af-cc8a1751307a": {
+          "location": "ClientSideExtension.ApplicationCustomizer",
+          "properties": {
+            "enabled": true,
+            "debug": true,
+            "utilities": {
+              "back-to-top": {
+                "enabled": true,
+                "minimiseTarget": "bottom",
+                "bottomSide": "right",
+                "defaultState": "minimised"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
