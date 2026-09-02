@@ -246,6 +246,12 @@ export class DockManager {
       return sibEntry ? this._priorityOf(sibEntry) > myPriority : false;
     });
     zone.insertBefore(el, next || null);
+    // Entrance motion: start shrunken/low, release next frame (the shared
+    // transition rule animates it in; reduced-motion kills transitions).
+    el.classList.add('ikm-dock-enter');
+    window.requestAnimationFrame(() =>
+      window.requestAnimationFrame(() => el.classList.remove('ikm-dock-enter'))
+    );
     entry.element = el;
   }
 
@@ -392,12 +398,11 @@ export class DockManager {
 .ikm-dock-chip, .ikm-dock-tab {
   display: inline-flex; align-items: center; gap: 6px;
   background: var(--ikm-dock-primary); color: #fff;
-  border: 1px solid rgba(255,255,255,0.35); cursor: pointer;
+  border: 0; cursor: pointer;
   font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px; font-weight: 600;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.25);
   transition: transform 120ms ease, opacity 120ms ease;
 }
-.ikm-dock-chip { border-radius: 999px; padding: 6px 14px; }
+.ikm-dock-chip { border-radius: 0; padding: 0 12px; height: 30px; }
 .ikm-dock-chip.ikm-dock-backtotop {
   width: 40px; height: 30px; padding: 0; border-radius: 0; border: 0;
   justify-content: center; box-shadow: none;
@@ -411,6 +416,7 @@ export class DockManager {
 .ikm-dock-chip:focus-visible, .ikm-dock-tab:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .ikm-dock-icon { font-size: 12px; line-height: 1; }
 .ikm-dock-offstage, .ikm-dock-suppressed { opacity: 0; pointer-events: none; transform: translateY(6px); }
+.ikm-dock-enter { opacity: 0; transform: scale(0.5) translateY(16px); }
 @media (max-width: 1024px) { #${ROOT_ID} { display: none !important; } }
 @media (prefers-reduced-motion: reduce) {
   .ikm-dock-chip, .ikm-dock-tab { transition: none; }
