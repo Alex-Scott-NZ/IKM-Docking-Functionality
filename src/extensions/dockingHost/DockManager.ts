@@ -194,11 +194,30 @@ export class DockManager {
     const s = this._getSettings(id);
     const target = s ? s.minimiseTarget : 'bottom';
     if (target === 'edge-left' || target === 'edge-right') {
-      return this._zones[target];
+      return this._edgeZone(target, (s && s.edgeAlign) || 'middle');
     }
     // 'bottom' and (for now) 'user-choice' land in a bottom slot.
     const side = s && s.bottomSide === 'left' ? 'bottom-left' : 'bottom-right';
     return this._zones[side];
+  }
+
+  /**
+   * Edge zones come in three vertical clusters (contract v1.1 edgeAlign:
+   * top/middle/bottom). The middle cluster is the base zone built up front;
+   * top/bottom variants are created lazily, styled by the align class.
+   */
+  private _edgeZone(target: 'edge-left' | 'edge-right', align: 'top' | 'middle' | 'bottom'): HTMLElement {
+    if (align === 'middle') { return this._zones[target]; }
+    const key = `${target}:${align}`;
+    if (!this._zones[key]) {
+      const base = this._zones[target];
+      const el = document.createElement('div');
+      const side = target === 'edge-left' ? 'ikm-dock-left' : 'ikm-dock-right';
+      el.className = `ikm-dock-zone-edge ${side} ikm-dock-edge-${align}`;
+      (base.parentElement || document.body).appendChild(el);
+      this._zones[key] = el;
+    }
+    return this._zones[key];
   }
 
   private _priorityOf(entry: IRegistered): number {
@@ -361,8 +380,12 @@ export class DockManager {
     if (!zone) { return; }
     const rightPx = `${this._scrollbarClearancePx()}px`;
     if (zone.style.right !== rightPx) { zone.style.right = rightPx; }
-    const edgeRight = this._zones['edge-right'];
-    if (edgeRight && edgeRight.style.right !== rightPx) { edgeRight.style.right = rightPx; }
+    // All right-edge zones (base + lazily created top/bottom clusters).
+    Object.keys(this._zones).forEach((k) => {
+      if (k.indexOf('edge-right') !== 0) { return; }
+      const z = this._zones[k];
+      if (z && z.style.right !== rightPx) { z.style.right = rightPx; }
+    });
     const zRect = zone.getBoundingClientRect();
     if (zRect.width === 0) { return; }
     const clearRight = Math.round(window.innerWidth - zRect.left + 8);
@@ -432,6 +455,8 @@ export class DockManager {
 .ikm-dock-zone-edge { position: fixed; top: 25%; z-index: ${DOCK_Z_INDEX}; display: flex; flex-direction: column; gap: 8px; }
 .ikm-dock-zone-edge.ikm-dock-left { left: 0; }
 .ikm-dock-zone-edge.ikm-dock-right { right: 0; }
+.ikm-dock-zone-edge.ikm-dock-edge-top { top: 10%; }
+.ikm-dock-zone-edge.ikm-dock-edge-bottom { top: auto; bottom: 10%; }
 .ikm-dock-chip, .ikm-dock-tab {
   display: inline-flex; align-items: center; gap: 6px;
   background: var(--ikm-dock-primary); color: #fff;

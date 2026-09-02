@@ -29,6 +29,8 @@ export interface IDockableUtilitySettings {
   minimiseTarget: MinimiseTarget;
   /** Slot when target is 'bottom'. */
   bottomSide: 'left' | 'right';
+  /** Vertical cluster when target is an edge (contract v1.1). Default 'middle'. */
+  edgeAlign?: 'top' | 'middle' | 'bottom';
   defaultState: 'expanded' | 'minimised';
   priority?: number;
 }
