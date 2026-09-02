@@ -323,9 +323,35 @@ export class DockManager {
    * zone. Re-applied every tick: the pill mounts async and React re-renders
    * can wipe the inline style. Goes away once feedback registers properly.
    */
+  /**
+   * Measure the scroll region's actual scrollbar width so right-side zones
+   * sit just clear of it instead of guessing. Before the region is known
+   * (no scroll yet), try SharePoint's content region by its automation id,
+   * else assume a classic 16px bar.
+   */
+  private _scrollbarClearancePx(): number {
+    let region = this._scrollRegion;
+    if (!region) {
+      const seed = document.querySelector('div[data-automation-id="contentScrollRegion"]');
+      if (seed instanceof HTMLElement) { this._scrollRegion = region = seed; }
+    }
+    let sb = 0;
+    if (region instanceof Window) {
+      sb = window.innerWidth - document.documentElement.clientWidth;
+    } else if (region) {
+      sb = region.offsetWidth - region.clientWidth;
+    }
+    if (!sb || sb < 0) { sb = 16; }
+    return sb + 4;
+  }
+
   private _updateBottomRowOffset(): void {
     const zone = this._zones['bottom-right'];
     if (!zone) { return; }
+    const rightPx = `${this._scrollbarClearancePx()}px`;
+    if (zone.style.right !== rightPx) { zone.style.right = rightPx; }
+    const edgeRight = this._zones['edge-right'];
+    if (edgeRight && edgeRight.style.right !== rightPx) { edgeRight.style.right = rightPx; }
     const zRect = zone.getBoundingClientRect();
     if (zRect.width === 0) { return; }
     const clearRight = Math.round(window.innerWidth - zRect.left + 8);
