@@ -335,14 +335,19 @@ export class DockManager {
       const seed = document.querySelector('div[data-automation-id="contentScrollRegion"]');
       if (seed instanceof HTMLElement) { this._scrollRegion = region = seed; }
     }
-    let sb = 0;
-    if (region instanceof Window) {
-      sb = window.innerWidth - document.documentElement.clientWidth;
-    } else if (region) {
-      sb = region.offsetWidth - region.clientWidth;
+    if (region instanceof Window || !region) {
+      const sb = window.innerWidth - document.documentElement.clientWidth;
+      return (sb > 0 ? sb : 16) + 4;
     }
-    if (!sb || sb < 0) { sb = 16; }
-    return sb + 4;
+    // The region's right edge is not the window's right edge — SharePoint
+    // leaves a sliver of page chrome outside it — so clear the point where
+    // the scrollbar actually starts, not just the scrollbar's own width.
+    const rect = region.getBoundingClientRect();
+    const scrollbarLeft = rect.left + region.clientLeft + region.clientWidth;
+    const clearance = Math.ceil(window.innerWidth - scrollbarLeft) + 4;
+    // Nonsense geometry (region hidden or mid-layout) → safe static offset.
+    if (clearance < 4 || clearance > 80) { return 20; }
+    return clearance;
   }
 
   private _updateBottomRowOffset(): void {
