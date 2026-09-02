@@ -1,6 +1,6 @@
 {
   "name": "ikm-docking-host-extension",
-  "version": "0.1.0.6",
+  "version": "0.1.0.7",
   "private": true,
   "engines": {
     "node": ">=22.14.0 < 23.0.0"

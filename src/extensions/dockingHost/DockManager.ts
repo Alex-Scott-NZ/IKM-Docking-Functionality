@@ -125,6 +125,11 @@ export class DockManager {
     this._registered.set(d.id, entry);
     this._renderEntry(entry);
     this._applyArbitration();
+    // The row just changed width — re-nudge the legacy feedback bar NOW.
+    // The nudge otherwise runs only on scroll ticks, so a chip appearing
+    // mid-read (e.g. the reader minimising the TOC) overlapped the bar
+    // until the next scroll.
+    this._updateBottomRowOffset();
     this._log(`registered '${d.id}'`);
   }
 
@@ -134,6 +139,7 @@ export class DockManager {
     entry.element?.remove();
     this._registered.delete(id);
     this._applyArbitration();
+    this._updateBottomRowOffset(); // row narrowed — see _register
     this._log(`unregistered '${id}'`);
   }
 
