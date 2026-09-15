@@ -58,12 +58,12 @@ export default class DockingHostApplicationCustomizer
 
     this._manager = new DockManager(props, themePrimary, this._bottomPlaceholder?.domElement);
     this._manager.start();
-    this._applyEditModeVisibility();
+    this._applyVisibility();
 
     this.context.application.navigatedEvent.add(this, () => {
-      // SPA navigation: re-check edit mode (the canvas remounts; docking UI
-      // must never show in edit mode — editing chrome out-stacks everything).
-      this._applyEditModeVisibility();
+      // SPA navigation: re-check edit mode AND the surface type (the reader
+      // can move between a page and a list view without a full reload).
+      this._applyVisibility();
     });
   }
 
@@ -72,8 +72,39 @@ export default class DockingHostApplicationCustomizer
     this._manager = undefined;
   }
 
-  private _applyEditModeVisibility(): void {
+  private _applyVisibility(): void {
+    // Hidden in edit mode (editing chrome out-stacks everything) and on
+    // non-reading surfaces (user decision 2026-09-15 after the edge tab
+    // covered the Site Pages library's columns).
     const inEdit = /[?&]Mode=Edit/i.test(window.location.search);
-    this._manager?.setHidden(inEdit);
+    this._manager?.setHidden(inEdit || !this._isReadingSurface());
+  }
+
+  /**
+   * Dock chrome is a READING aid: it renders only on modern site pages.
+   * List and library views, forms and system pages have edge-to-edge
+   * content and no reading journey — the host withdraws entirely there.
+   */
+  private _isReadingSurface(): boolean {
+    try {
+      const pc = this.context.pageContext as unknown as {
+        listItem?: object | null;
+        list?: { serverRelativeUrl?: string } | null;
+      };
+      const path = window.location.pathname.toLowerCase();
+      // Library view pages (incl. the Site Pages library's own views).
+      if (path.indexOf('/forms/') !== -1) { return false; }
+      const listUrl = (pc.list && pc.list.serverRelativeUrl
+        ? String(pc.list.serverRelativeUrl)
+        : ''
+      ).toLowerCase();
+      const inSitePages =
+        listUrl.indexOf('/sitepages') !== -1 || path.indexOf('/sitepages/') !== -1;
+      // A modern site page is an ITEM in the Site Pages library; a list or
+      // library VIEW has no current item.
+      return !!pc.listItem && inSitePages;
+    } catch {
+      return true; // fail open — never blank a real page over a probe error
+    }
   }
 }

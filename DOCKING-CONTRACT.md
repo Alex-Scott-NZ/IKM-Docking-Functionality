@@ -129,3 +129,38 @@ slot → host renders its own strip. Known-ID contract, same style as
 it; anything breaking ships as v2 alongside v1 for a deprecation window. The
 host logs (under `debug`) any registration with an unknown shape rather than
 throwing.
+
+## v1.1 additions (2026-09-15)
+
+`IDockableUtilitySettings.edgeAlign?: 'top' | 'middle' | 'bottom'` — vertical
+cluster when `minimiseTarget` is an edge (default `middle`). Additive;
+`apiVersion` stays 1.
+
+## v1.2 additions (2026-09-15): host-owned motion + reading surfaces
+
+**Motion.** The HOST owns all minimise/restore animation, because only the
+host knows where a utility's chip/tab actually is (config can put it in
+either bottom corner or on an edge). Two optional methods on `window.ikmDock`
+(feature-detect; `apiVersion` stays 1):
+
+```ts
+interface IDockRect { left: number; top: number; width: number; height: number; }
+animateMinimise?(id: string, from: IDockRect, done?: () => void): void;
+animateRestore?(id: string, to: IDockRect, done?: () => void): void;
+```
+
+The participant hides (minimise) or shows (restore, in `done`) its real UI
+immediately; the host flies a lightweight theme-coloured proxy between the
+given rect and the utility's chip — or its destination zone when the chip
+doesn't exist yet, since registration normally happens after the minimise.
+One duration (180 ms), one easing, one `prefers-reduced-motion` policy for
+every participant; participants ship NO animation code of their own. Against
+a pre-1.2 host the fallback is an instant transition — the usual degrade
+shape.
+
+**Reading surfaces.** Dock chrome is a reading aid: the host renders only on
+modern site pages (an item in a Site Pages library). On list and library
+views, forms and system pages — edge-to-edge content, no reading journey —
+the host withdraws entirely (same mechanism as the edit-mode withdrawal,
+re-evaluated on SPA navigation). Decided 2026-09-15 after the feedback edge
+tab covered the Site Pages library's columns.

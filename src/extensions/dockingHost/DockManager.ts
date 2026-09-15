@@ -5,6 +5,7 @@ import {
   RESERVED_PRIORITIES,
   DockZone,
   IDockDescriptor,
+  IDockRect,
   IDockableUtilitySettings,
   IDockingHostProperties,
   IIkmDock
@@ -22,6 +23,8 @@ const FOOTER_SLOT_ID = 'ikm-dock-bottom-slot';
  */
 const BACK_TO_TOP_MIN_SCROLL_PX = 400;
 const FALLBACK_PRIMARY = '#085a64';
+/** One motion duration for every participant (contract v1.2 host-owned motion). */
+const DOCK_MOTION_MS = 180;
 
 interface IRegistered {
   descriptor: IDockDescriptor;
@@ -103,10 +106,72 @@ export class DockManager {
       register: (d) => this._register(d),
       unregister: (id) => this._unregister(id),
       update: (id, patch) => this._update(id, patch),
-      getSettings: (id) => this._getSettings(id)
+      getSettings: (id) => this._getSettings(id),
+      animateMinimise: (id, from, done) => this._animate(id, from, this._dockTargetRect(id), done),
+      animateRestore: (id, to, done) => this._animate(id, this._dockTargetRect(id), to, done)
     };
     (window as unknown as { ikmDock?: IIkmDock }).ikmDock = api;
     document.dispatchEvent(new CustomEvent(DOCK_READY_EVENT, { detail: { apiVersion: DOCK_API_VERSION } }));
+  }
+
+  // ------------------------------------------------------- motion (v1.2)
+
+  /**
+   * Where a utility's minimised UI lives right now: its chip/tab if
+   * rendered, else its destination zone (registration usually happens
+   * AFTER the minimise motion, so the zone anchor is the normal case).
+   */
+  private _dockTargetRect(id: string): IDockRect {
+    const entry = this._registered.get(id);
+    const el = (entry && entry.element) || this._zoneFor(id);
+    const r = el.getBoundingClientRect();
+    if (r.left !== 0 || r.top !== 0 || r.width !== 0 || r.height !== 0) {
+      // An empty zone has a real anchor but zero size — give the proxy
+      // something chip-sized to land on.
+      return { left: r.left, top: r.top, width: Math.max(r.width, 32), height: Math.max(r.height, 32) };
+    }
+    // Nonsense geometry (zone hidden mid-layout): bottom-right corner.
+    return { left: window.innerWidth - 64, top: window.innerHeight - 44, width: 32, height: 32 };
+  }
+
+  /**
+   * Fly a lightweight proxy between two rects (contract v1.2 — the host
+   * owns all minimise/restore motion so it can aim at wherever config put
+   * the dock). The participant hides/shows its real UI around this; `done`
+   * fires when the proxy lands, immediately under reduced motion.
+   */
+  private _animate(id: string, from: IDockRect, to: IDockRect, done?: () => void): void {
+    const finish = (): void => { if (done) { done(); } };
+    const reduced = typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (this._disposed || reduced || !from || !to || from.width <= 0 || from.height <= 0) {
+      finish();
+      return;
+    }
+    const proxy = document.createElement('div');
+    proxy.className = 'ikm-dock-motion-proxy';
+    proxy.style.left = `${from.left}px`;
+    proxy.style.top = `${from.top}px`;
+    proxy.style.width = `${from.width}px`;
+    proxy.style.height = `${from.height}px`;
+    proxy.style.background = this._themePrimary;
+    document.body.appendChild(proxy);
+    proxy.getBoundingClientRect(); // commit start geometry before transitioning
+    const sx = Math.max(to.width / from.width, 0.01);
+    const sy = Math.max(to.height / from.height, 0.01);
+    const tx = (to.left + to.width / 2) - (from.left + from.width / 2);
+    const ty = (to.top + to.height / 2) - (from.top + from.height / 2);
+    proxy.style.transform = `translate(${tx}px, ${ty}px) scale(${sx}, ${sy})`;
+    proxy.style.opacity = '0.15';
+    let ended = false;
+    const end = (): void => {
+      if (ended) { return; }
+      ended = true;
+      proxy.remove();
+      finish();
+    };
+    proxy.addEventListener('transitionend', end);
+    window.setTimeout(end, DOCK_MOTION_MS + 120); // safety net if transitionend is swallowed
   }
 
   private _register(d: IDockDescriptor): void {
@@ -457,6 +522,7 @@ export class DockManager {
 .ikm-dock-zone-edge.ikm-dock-right { right: 0; }
 .ikm-dock-zone-edge.ikm-dock-edge-top { top: 10%; }
 .ikm-dock-zone-edge.ikm-dock-edge-bottom { top: auto; bottom: 10%; }
+.ikm-dock-motion-proxy { position: fixed; z-index: ${DOCK_Z_INDEX + 1}; pointer-events: none; border-radius: 6px; opacity: 0.55; transform-origin: center; will-change: transform, opacity; transition: transform ${DOCK_MOTION_MS}ms ease-in, opacity ${DOCK_MOTION_MS}ms ease-in; }
 .ikm-dock-chip, .ikm-dock-tab {
   display: inline-flex; align-items: center; gap: 6px;
   background: var(--ikm-dock-primary); color: #fff;

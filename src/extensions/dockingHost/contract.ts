@@ -43,6 +43,14 @@ export interface IDockingHostProperties {
   debug?: boolean;
 }
 
+/** A viewport-relative rectangle (contract v1.2 motion API). */
+export interface IDockRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
 /** window.ikmDock */
 export interface IIkmDock {
   apiVersion: typeof DOCK_API_VERSION;
@@ -50,6 +58,18 @@ export interface IIkmDock {
   unregister(id: string): void;
   update(id: string, patch: Partial<IDockDescriptor>): void;
   getSettings(id: string): IDockableUtilitySettings | undefined;
+  /**
+   * Contract v1.2 (additive — feature-detect; apiVersion stays 1): the HOST
+   * owns minimise/restore motion, because only the host knows where the
+   * chip/tab actually is. The participant hides (or shows) itself
+   * IMMEDIATELY and hands over its rectangle; the host flies a lightweight
+   * proxy between that rect and the utility's dock target — one duration,
+   * one easing, one reduced-motion policy for every participant.
+   * `animateRestore`'s `done` fires when the proxy lands (or at once under
+   * reduced motion) — show the restored UI in it.
+   */
+  animateMinimise?(id: string, from: IDockRect, done?: () => void): void;
+  animateRestore?(id: string, to: IDockRect, done?: () => void): void;
 }
 
 export const DOCK_READY_EVENT = 'ikm-dock:ready';
