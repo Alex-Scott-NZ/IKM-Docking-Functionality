@@ -129,11 +129,20 @@ export class DockManager {
         if (source) {
           try { this._ghostCache.set(id, source.cloneNode(true) as HTMLElement); } catch { /* slab restores */ }
         }
+        // Hand-off applies only to chips BORN during this flight (they
+        // render preflight-hidden and pop in at landing). A chip that
+        // already existed — feedback re-minimising from its open form —
+        // stays visible throughout and just pulses when the flight lands:
+        // hiding a button the reader could already see reads as a glitch.
+        const chipExisted = !!this._registered.get(id)?.element;
         this._minimising.add(id);
-        this._setChipPreflight(id, true);
         this._animate(id, from, this._dockTargetRect(id), () => {
           this._minimising.delete(id);
-          this._revealChipAfterFlight(id);
+          if (chipExisted) {
+            this._pulseChip(id);
+          } else {
+            this._revealChipAfterFlight(id);
+          }
           if (done) { done(); }
         }, source);
       },
@@ -183,6 +192,15 @@ export class DockManager {
     const el = this._registered.get(id)?.element;
     if (!el) { return; }
     el.classList.toggle('ikm-dock-preflight', preflight);
+  }
+
+  /** A flight landed on an ALREADY-VISIBLE chip: acknowledge with a pulse. */
+  private _pulseChip(id: string): void {
+    const el = this._registered.get(id)?.element;
+    if (!el) { return; }
+    void el.offsetWidth;
+    el.classList.add('ikm-dock-pulse');
+    window.setTimeout(() => el.classList.remove('ikm-dock-pulse'), 300);
   }
 
   /** Proxy landed: reveal the chip with a small pop (the hand-off moment). */
@@ -829,7 +847,9 @@ export class DockManager {
 .ikm-dock-dragging { opacity: 0.65; transform: scale(1.08); cursor: grabbing; }
 .ikm-dock-land { animation: ikmDockLand 160ms ease-out; }
 @keyframes ikmDockLand { from { transform: scale(0.6); opacity: 0.4; } to { transform: scale(1); opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .ikm-dock-land { animation: none; } }
+.ikm-dock-pulse { animation: ikmDockPulse 220ms ease-out; }
+@keyframes ikmDockPulse { 0% { transform: scale(1); } 45% { transform: scale(1.18); } 100% { transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { .ikm-dock-land, .ikm-dock-pulse { animation: none; } }
 .ikm-dock-chip, .ikm-dock-tab {
   display: inline-flex; align-items: center; gap: 6px;
   background: var(--ikm-dock-primary); color: #fff;
