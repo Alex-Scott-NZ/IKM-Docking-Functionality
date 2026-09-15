@@ -1,0 +1,22 @@
+{
+  "@microsoft/generator-sharepoint": {
+    "whichFolder": "subdir",
+    "solutionName": "IKM-Docking-Host-Extension",
+    "useGulp": false,
+    "componentType": "extension",
+    "extensionType": "ApplicationCustomizer",
+    "componentName": "DockingHost",
+    "plusBeta": false,
+    "isCreatingSolution": true,
+    "nodeVersion": "22.23.1",
+    "sdksVersions": {},
+    "version": "1.23.0",
+    "libraryName": "ikm-docking-host-extension",
+    "libraryId": "039d41bf-451c-4a62-85c0-f2f9e97b4e42",
+    "environment": "spo",
+    "packageManager": "npm",
+    "solutionShortDescription": "IKM-Docking-Host-Extension description",
+    "skipFeatureDeployment": true,
+    "isDomainIsolated": false
+  }
+}

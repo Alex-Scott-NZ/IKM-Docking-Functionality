@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Elements xmlns="http://schemas.microsoft.com/sharepoint/">
+    <ClientSideComponentInstance
+        Title="DockingHost"
+        Location="ClientSideExtension.ApplicationCustomizer"
+        ComponentId="5ccdd637-e7e2-4025-a0af-cc8a1751307a"
+        Properties="{&quot;enabled&quot;:true,&quot;debug&quot;:false}">
+    </ClientSideComponentInstance>
+</Elements>

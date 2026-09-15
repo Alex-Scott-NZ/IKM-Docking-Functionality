@@ -1,0 +1,18 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/spfx-build/config.2.0.schema.json",
+  "version": "2.0",
+  "bundles": {
+    "docking-host-application-customizer": {
+      "components": [
+        {
+          "entrypoint": "./lib/extensions/dockingHost/DockingHostApplicationCustomizer.js",
+          "manifest": "./src/extensions/dockingHost/DockingHostApplicationCustomizer.manifest.json"
+        }
+      ]
+    }
+  },
+  "externals": {},
+  "localizedResources": {
+    "DockingHostApplicationCustomizerStrings": "lib/extensions/dockingHost/loc/{locale}.js"
+  }
+}
