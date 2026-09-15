@@ -68,8 +68,13 @@ export interface IIkmDock {
    * `animateRestore`'s `done` fires when the proxy lands (or at once under
    * reduced motion) — show the restored UI in it.
    */
-  animateMinimise?(id: string, from: IDockRect, done?: () => void): void;
-  animateRestore?(id: string, to: IDockRect, done?: () => void): void;
+  animateMinimise?(id: string, from: IDockRect, done?: () => void, source?: Element): void;
+  /**
+   * `chipHandOff`: the chip departs WITH the flight (hidden at launch) —
+   * for utilities that unregister on restore (TOC). Omit it for utilities
+   * whose chip is permanent while docked (feedback): theirs stays put.
+   */
+  animateRestore?(id: string, to: IDockRect, done?: () => void, options?: { chipHandOff?: boolean }): void;
 }
 
 export const DOCK_READY_EVENT = 'ikm-dock:ready';
