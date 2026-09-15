@@ -169,19 +169,81 @@ export class DockManager {
 
   // ------------------------------------------------------- motion (v1.2)
 
+  /** Priority for an id that may not be registered yet (pre-flight). */
+  private _priorityOfId(id: string): number {
+    const entry = this._registered.get(id);
+    if (entry) { return this._priorityOf(entry); }
+    const s = this._getSettings(id);
+    if (s && typeof s.priority === 'number') { return s.priority; }
+    return RESERVED_PRIORITIES[id] !== undefined ? RESERVED_PRIORITIES[id] : 100;
+  }
+
   /**
-   * Where a utility's minimised UI lives right now: its chip/tab if
-   * rendered, else its destination zone (registration usually happens
-   * AFTER the minimise motion, so the zone anchor is the normal case).
+   * Where a utility's minimised UI lives right now — or WILL live. Its
+   * chip/tab if rendered; otherwise the flight must aim at the SLOT the
+   * chip is about to take among its future siblings (registration happens
+   * after the minimise lands). Aiming at the bare zone anchor sent every
+   * flight to the first chip's position regardless of where the new one
+   * would actually join (visible with several tabs stacked on an edge).
    */
   private _dockTargetRect(id: string): IDockRect {
     const entry = this._registered.get(id);
-    const el = (entry && entry.element) || this._zoneFor(id);
-    const r = el.getBoundingClientRect();
-    if (r.left !== 0 || r.top !== 0 || r.width !== 0 || r.height !== 0) {
-      // An empty zone has a real anchor but zero size — give the proxy
-      // something chip-sized to land on.
-      return { left: r.left, top: r.top, width: Math.max(r.width, 32), height: Math.max(r.height, 32) };
+    const chip = entry && entry.element;
+    if (chip) {
+      const r = chip.getBoundingClientRect();
+      if (r.left !== 0 || r.top !== 0 || r.width !== 0 || r.height !== 0) {
+        return { left: r.left, top: r.top, width: Math.max(r.width, 32), height: Math.max(r.height, 32) };
+      }
+    }
+    const zone = this._zoneFor(id);
+    const kids = Array.prototype.slice.call(zone.children) as HTMLElement[];
+    if (kids.length > 0) {
+      // Predict the final DOM index: priority insertion (as _renderEntry
+      // does), then the reader's saved order re-sort (as _applyReaderOrder
+      // does). Then aim at the chip currently holding that slot — it's the
+      // spot our chip inherits as everything after it shifts along.
+      const myPriority = this._priorityOfId(id);
+      let insertIdx = kids.length;
+      for (let i = 0; i < kids.length; i++) {
+        const sibId = kids[i].getAttribute('data-ikm-dock-id') || '';
+        if (this._priorityOfId(sibId) > myPriority) { insertIdx = i; break; }
+      }
+      const simulated = kids.map((k) => k.getAttribute('data-ikm-dock-id') || '');
+      simulated.splice(insertIdx, 0, id);
+      const saved = this._readOrder()[zone.getAttribute('data-ikm-zone') || ''] || [];
+      const rank = (x: string, idx: number): number => {
+        if (x === 'back-to-top') { return -1; }
+        const i = saved.indexOf(x);
+        return i === -1 ? 1000 + idx : i;
+      };
+      const finalOrder = simulated
+        .map((x, idx) => ({ x, r: rank(x, idx) }))
+        .sort((a, b) => a.r - b.r)
+        .map((o) => o.x);
+      const followerId = finalOrder[finalOrder.indexOf(id) + 1];
+      const follower = followerId
+        ? kids.filter((k) => k.getAttribute('data-ikm-dock-id') === followerId)[0]
+        : undefined;
+      if (follower) {
+        const fr = follower.getBoundingClientRect();
+        return { left: fr.left, top: fr.top, width: Math.max(fr.width, 32), height: Math.max(fr.height, 32) };
+      }
+      // Appending after the DOM-last chip: one slot onward, direction-aware.
+      const last = kids[kids.length - 1];
+      const lr = last.getBoundingClientRect();
+      const gap = 8;
+      const w = Math.max(lr.width, 32);
+      const h = Math.max(lr.height, 32);
+      const isColumn = zone.className.indexOf('ikm-dock-zone-edge') !== -1;
+      const reversed = window.getComputedStyle(zone).flexDirection.indexOf('reverse') !== -1;
+      if (isColumn) { return { left: lr.left, top: lr.bottom + gap, width: w, height: h }; }
+      if (reversed) { return { left: lr.left - gap - w, top: lr.top, width: w, height: h }; }
+      return { left: lr.right + gap, top: lr.top, width: w, height: h };
+    }
+    const zr = zone.getBoundingClientRect();
+    if (zr.left !== 0 || zr.top !== 0 || zr.width !== 0 || zr.height !== 0) {
+      // Empty zone: its anchor, chip-sized.
+      return { left: zr.left, top: zr.top, width: Math.max(zr.width, 32), height: Math.max(zr.height, 32) };
     }
     // Nonsense geometry (zone hidden mid-layout): bottom-right corner.
     return { left: window.innerWidth - 64, top: window.innerHeight - 44, width: 32, height: 32 };
