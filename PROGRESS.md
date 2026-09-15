@@ -86,3 +86,6 @@ Full details: [APPROACH.md](APPROACH.md) (plan + phases) and
 4. Feedback integration: the unrecoverable session-dismiss X becomes
    minimise-to-dock.
 5. Footer: modernise, sticky-bottom mode, host the bottom zone inside the bar.
+
+> **Backlog & feedback intake now lives in [BACKLOG.md](BACKLOG.md)** — future work and stakeholder feedback land there (first intake: Change Champions ToC themes, 2026-09-15).
+
