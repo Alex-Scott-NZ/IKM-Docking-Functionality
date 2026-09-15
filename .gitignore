@@ -19,6 +19,15 @@ temp
 *.sppkg
 .heft
 
+# ...but DO ship the built package in the repo (house convention — the
+# other IKM repos commit theirs too, so the uploadable bytes are versioned).
+# The bare 'solution' rule above ignores the sharepoint/solution DIR, and
+# git won't look inside an ignored dir, so the dir must be re-included
+# before the .sppkg inside it can be.
+!sharepoint/solution/
+sharepoint/solution/debug/
+!sharepoint/solution/*.sppkg
+
 # Coverage directory used by tools like istanbul
 coverage
 
