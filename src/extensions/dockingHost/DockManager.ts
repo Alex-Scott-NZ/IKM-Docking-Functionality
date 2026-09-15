@@ -530,12 +530,34 @@ export class DockManager {
     let dragging = false;
     let sx = 0;
     let sy = 0;
+    let startLeft = 0;
+    let startTop = 0;
+    let tx = 0; // transform currently applied to the held chip
+    let ty = 0;
+
+    // The held chip follows the pointer 1:1. Because its DOM slot changes
+    // mid-drag (reorders), the transform is recomputed against its CURRENT
+    // layout position: desired screen pos = start rect + pointer travel.
+    const followPointer = (e: PointerEvent): void => {
+      const r = el.getBoundingClientRect();
+      const layoutLeft = r.left - tx;
+      const layoutTop = r.top - ty;
+      tx = (startLeft + (e.clientX - sx)) - layoutLeft;
+      ty = (startTop + (e.clientY - sy)) - layoutTop;
+      el.style.transform = `translate(${tx}px, ${ty}px) scale(1.05)`;
+    };
+
     el.addEventListener('pointerdown', (e: PointerEvent) => {
       if (e.button !== 0) { return; }
       tracking = true;
       dragging = false;
       sx = e.clientX;
       sy = e.clientY;
+      const r = el.getBoundingClientRect();
+      startLeft = r.left;
+      startTop = r.top;
+      tx = 0;
+      ty = 0;
     });
     el.addEventListener('pointermove', (e: PointerEvent) => {
       if (!tracking) { return; }
@@ -579,8 +601,24 @@ export class DockManager {
         .map((c) => c.getAttribute('data-ikm-dock-id')).join('|');
       const desiredIds = desired.map((c) => c.getAttribute('data-ikm-dock-id')).join('|');
       if (currentIds !== desiredIds) {
+        // FLIP the displaced siblings: capture where they were, reorder the
+        // DOM, then let each one visibly slide from old slot to new.
+        const others = movable.concat(pinned);
+        const before = others.map((o) => ({ o, r: o.getBoundingClientRect() }));
         desired.forEach((n) => zone.appendChild(n));
+        before.forEach(({ o, r }) => {
+          const a = o.getBoundingClientRect();
+          const dx = r.left - a.left;
+          const dy = r.top - a.top;
+          if ((dx || dy) && typeof o.animate === 'function') {
+            o.animate(
+              [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }],
+              { duration: 150, easing: 'ease-out' }
+            );
+          }
+        });
       }
+      followPointer(e);
     });
     const finish = (e: PointerEvent): void => {
       if (!tracking) { return; }
@@ -589,6 +627,18 @@ export class DockManager {
         dragging = false;
         el.classList.remove('ikm-dock-dragging');
         try { el.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+        // Settle: animate the held offset away into the final slot.
+        const settleTx = tx;
+        const settleTy = ty;
+        el.style.transform = '';
+        tx = 0;
+        ty = 0;
+        if ((settleTx || settleTy) && typeof el.animate === 'function') {
+          el.animate(
+            [{ transform: `translate(${settleTx}px, ${settleTy}px) scale(1.05)` }, { transform: 'none' }],
+            { duration: 150, easing: 'ease-out' }
+          );
+        }
         const zone = el.parentElement;
         if (zone) { this._persistZoneOrder(zone); }
         this._dragEndedAt = Date.now();
@@ -844,7 +894,7 @@ export class DockManager {
 .ikm-dock-proxy-card { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; width: 100%; height: 100%; color: #fff; font-size: 15px; font-weight: 600; }
 .ikm-dock-proxy-card .ms-Icon { font-size: 28px; }
 .ikm-dock-chip, .ikm-dock-tab { touch-action: none; }
-.ikm-dock-dragging { opacity: 0.65; transform: scale(1.08); cursor: grabbing; }
+.ikm-dock-dragging { opacity: 0.8; cursor: grabbing; z-index: 5; position: relative; transition: none !important; }
 .ikm-dock-land { animation: ikmDockLand 160ms ease-out; }
 @keyframes ikmDockLand { from { transform: scale(0.6); opacity: 0.4; } to { transform: scale(1); opacity: 1; } }
 .ikm-dock-pulse { animation: ikmDockPulse 220ms ease-out; }
