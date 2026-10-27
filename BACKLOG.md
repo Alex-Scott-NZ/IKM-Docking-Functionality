@@ -44,6 +44,13 @@ Thread comments worth acting on:
 
 ## Engineering backlog (standing items)
 
+- **2026-10-28 - Floating Contents at 175% and 200% zoom (TOC web part, not the dock):**
+  the TOC hides its floating panel below 1024px (`ms-screen-lg-down`), so readers at
+  high zoom get only the inline table of contents, and since TOC 1.0.2.60 no Contents
+  tab either. This is what Megan hit in September. Allowing it down to about 640px is a
+  small change but a design call. Held for later at the user's request, not in the
+  status note.
+
 - **Chip context menu (user-choice phase):** un-dock/restore for feedback +
   "Dock left / Dock right" reader choice — the deferred un-dock affordance.
 - **Mobile feedback gap:** dock chrome hides < 1024px, so a first-touch
