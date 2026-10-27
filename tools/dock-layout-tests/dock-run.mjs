@@ -81,6 +81,30 @@ async function drag(id, onto, past = 0) {
   await mouse('mouseReleased', b.x + dx, b.y + dy);
   await mouse('mouseMoved', 5, 5);
 }
+// Pull chip `id` straight out of its zone onto the page, `stepPx` per mouse
+// event (a quick flick moves 15px+ between events; a careful hand 2-3px),
+// with some wobble along the zone, and let go out there. Then sweep the
+// UNPRESSED mouse back across the chip and away, the way a reader would
+// after letting go.
+async function pullOut(id, stepPx) {
+  const a = await center(id);
+  const zone = await ev(`[...document.querySelectorAll('[data-ikm-dock-id="${id}"]')].find((e) => e.parentElement && e.parentElement.hasAttribute('data-ikm-zone')).parentElement.getAttribute('data-ikm-zone')`);
+  const out = zone.startsWith('edge-right') ? [-1, 0] : zone.startsWith('edge-left') ? [1, 0] : [0, -1];
+  await mouse('mouseMoved', a.x, a.y);
+  await mouse('mousePressed', a.x, a.y, 1);
+  let x = a.x, y = a.y;
+  for (let d = stepPx; d <= 300; d += stepPx) {
+    x = a.x + out[0] * d + (out[0] ? 0 : Math.sin(d / 45) * 40);
+    y = a.y + out[1] * d + (out[1] ? 0 : Math.sin(d / 45) * 40);
+    await mouse('mouseMoved', x, y, 1);
+    await sleep(16);
+  }
+  await mouse('mouseReleased', x, y);
+  await sleep(300);
+  for (let i = 0; i <= 12; i++) { await mouse('mouseMoved', a.x + (out[1] ? (i - 6) * 3 : 0), a.y + (out[0] ? (i - 6) * 3 : 0)); await sleep(16); }
+  for (let d = 4; d <= 200; d += 4) { await mouse('mouseMoved', a.x + out[0] * d + out[1] * 0, a.y + out[1] * d + 30 * out[0]); await sleep(16); }
+  await mouse('mouseMoved', 5, 5);
+}
 async function clickSel(sel) {
   const c = await ev(`(() => { const e = [...document.querySelectorAll(${JSON.stringify(sel)})].find(x => x.getBoundingClientRect().width > 0); if (!e) return null; const r = e.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()`);
   if (!c) throw new Error('nothing visible matches ' + sel);
@@ -160,6 +184,13 @@ for (const zone of ['bottom-left', 'bottom-right', 'edge-left', 'edge-right-bott
     await T.click(z3(zone)[0], 0); await T.viewport(1536, 760, 0); await T.check('resized mid-restore');
     await T.do('minimise mid-resize', `__dt.minimise('${z3(zone)[0]}')`, 0); await T.viewport(1920, 1040, 0); await T.check('resized mid-minimise');
   });
+  sc(`pull-out-${zone}`, 'Pull a docked tab out onto the page, quickly then slowly, and let go there', async (T) => {
+    for (const id of z3(zone)) await T.do(`minimise ${id}`, `__dt.minimise('${id}')`);
+    await T.check('docked');
+    await T.pullOut(b || a, 20); await T.check(`quick pull of ${b || a}, let go on the page, mouse back over it`);
+    await T.pullOut(b || a, 3); await T.check(`slow pull of ${b || a}, let go on the page`);
+    await T.click(b || a); await T.check(`${b || a} still opens with one click`);
+  });
   sc(`scroll-${zone}`, 'Scroll while docked and mid-flight', async (T) => {
     await T.scroll(1200);
     for (const id of z3(zone)) await T.do(`minimise ${id}`, `__dt.minimise('${id}')`, 0);
@@ -206,13 +237,14 @@ sc('real-zoom-in-docked', 'Dock feedback and contents on a wide screen, then zoo
   const tocAtZoom = await T.has('toc');
   await T.viewport(1920, 950); await T.wait(800); await T.check('back to 100%', ['feedback', 'toc']);
   return tocAtZoom;
-});
+}, 1025); // starts wide: the contents panel only floats above 1024px
 sc('real-three-right', 'Feedback, contents and a third utility on the right edge: reorder, open, close', async (T) => {
   await T.scroll(1500); await T.wait(800);
   await T.clickSel(TOC_MIN);
   await T.do('minimise zt-er-a', "__dt.minimise('zt-er-a')");
   await T.check('three on the right edge', ['feedback', 'toc', 'zt-er-a']);
   await T.drag('zt-er-a', 'feedback', 14); await T.check('dragged the third tab to the top', ['feedback', 'toc', 'zt-er-a']);
+  await T.pullOut('feedback', 20); await T.check('feedback tab pulled out quickly and let go on the page', ['feedback', 'toc', 'zt-er-a']);
   await T.click('feedback'); await T.wait(500); await T.clickSel(FB_MIN); await T.check('feedback opened and minimised', ['feedback', 'toc', 'zt-er-a']);
   await T.click('toc'); await T.wait(400); await T.clickSel(TOC_MIN); await T.check('contents restored and docked', ['feedback', 'toc', 'zt-er-a']);
   await T.click('toc', 0); await T.wait(80); await T.clickIfThere('toc'); await T.wait(700);
@@ -243,6 +275,7 @@ async function runCase(s, vpName) {
     async clickIfThere(id) { if (await ev(`!!__dt.center('${id}')`)) await click(id); rec.steps.push(`click ${id} again`); },
     async has(id) { return !!(await ev(`__dt.center('${id}')`)); },
     async drag(id, onto, past) { await drag(id, onto, past); rec.steps.push(`drag ${id} -> ${onto}`); const ns = await settle(); if (ns) rec.failures.push({ at: `drag ${id}`, v: [ns] }); },
+    async pullOut(id, stepPx) { await pullOut(id, stepPx); rec.steps.push(`pull ${id} out (${stepPx}px steps)`); const ns = await settle(); if (ns) rec.failures.push({ at: `pull ${id}`, v: [ns] }); },
     async viewport(vw, vh, settleMs = 1) { await viewport(vw, vh); rec.steps.push(`viewport ${vw}x${vh}`); if (settleMs) await settle(); },
     async clickSel(sel) { await clickSel(sel); rec.steps.push(`click ${sel}`); const ns = await settle(); if (ns) rec.failures.push({ at: `click ${sel}`, v: [ns] }); },
     async scroll(y) { await scrollTo(y); rec.steps.push(`scroll ${y}`); await sleep(120); },

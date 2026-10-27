@@ -25,6 +25,8 @@ const BACK_TO_TOP_MIN_SCROLL_PX = 400;
 const FALLBACK_PRIMARY = '#085a64';
 /** At or below this width edge tabs fold into the bottom row (see _narrowQuery). */
 const NARROW_PX = 1024;
+/** How far a dragged chip gives when pulled across its zone, out onto the page. */
+const DRAG_OFF_AXIS_PX = 16;
 /**
  * One motion duration for every participant (contract v1.2 host-owned
  * motion). 240ms with a decelerate curve: the old 180ms ease-in packed most
@@ -753,43 +755,70 @@ export class DockManager {
   private _makeDraggable(el: HTMLElement): void {
     let tracking = false;
     let dragging = false;
+    let pointerId = -1;
     let sx = 0;
     let sy = 0;
     let startLeft = 0;
     let startTop = 0;
     let tx = 0; // transform currently applied to the held chip
     let ty = 0;
+    let detach: (() => void) | undefined; // removes the window listeners of the open drag
 
-    // The held chip follows the pointer 1:1. Because its DOM slot changes
-    // mid-drag (reorders), the transform is recomputed against its CURRENT
-    // layout position: desired screen pos = start rect + pointer travel.
-    const followPointer = (e: PointerEvent): void => {
+    // The held chip follows the pointer 1:1 ALONG its zone. Across the zone
+    // (out onto the page) it only gives a little, rubber-band style: a drag
+    // reorders within the zone, so the chip must never look pulled out of
+    // the dock. Because its DOM slot changes mid-drag (reorders), the
+    // transform is recomputed against its CURRENT layout position:
+    // desired screen pos = start rect + pointer travel.
+    const followPointer = (e: PointerEvent, isColumn: boolean): void => {
+      const band = (d: number): number => Math.sign(d) * DRAG_OFF_AXIS_PX * (1 - Math.exp(-Math.abs(d) / DRAG_OFF_AXIS_PX));
+      const dx = isColumn ? band(e.clientX - sx) : e.clientX - sx;
+      const dy = isColumn ? e.clientY - sy : band(e.clientY - sy);
       const r = el.getBoundingClientRect();
       const layoutLeft = r.left - tx;
       const layoutTop = r.top - ty;
-      tx = (startLeft + (e.clientX - sx)) - layoutLeft;
-      ty = (startTop + (e.clientY - sy)) - layoutTop;
+      tx = (startLeft + dx) - layoutLeft;
+      ty = (startTop + dy) - layoutTop;
       el.style.transform = `translate(${tx}px, ${ty}px) scale(1.05)`;
     };
 
-    el.addEventListener('pointerdown', (e: PointerEvent) => {
-      if (e.button !== 0) { return; }
-      tracking = true;
-      dragging = false;
-      sx = e.clientX;
-      sy = e.clientY;
-      const r = el.getBoundingClientRect();
-      startLeft = r.left;
-      startTop = r.top;
-      tx = 0;
-      ty = 0;
-    });
-    el.addEventListener('pointermove', (e: PointerEvent) => {
+    const end = (): void => {
       if (!tracking) { return; }
+      tracking = false;
+      if (detach) { detach(); detach = undefined; }
+      try { el.releasePointerCapture(pointerId); } catch { /* already released */ }
+      if (dragging) {
+        dragging = false;
+        el.classList.remove('ikm-dock-dragging');
+        // Settle: animate the held offset away into the final slot.
+        const settleTx = tx;
+        const settleTy = ty;
+        el.style.transform = '';
+        tx = 0;
+        ty = 0;
+        if ((settleTx || settleTy) && typeof el.animate === 'function') {
+          el.animate(
+            [{ transform: `translate(${settleTx}px, ${settleTy}px) scale(1.05)` }, { transform: 'none' }],
+            { duration: 150, easing: 'ease-out' }
+          );
+        }
+        const zone = el.parentElement;
+        if (zone) { this._persistZoneOrder(zone); }
+        this._dragEndedAt = Date.now();
+      }
+    };
+
+    // Move/up are heard on the WINDOW, not the chip. Listening on the chip
+    // missed a quick pull: the pointer left a 26px edge tab before the drag
+    // threshold, the release landed on the page, and the chip stayed
+    // "held" until the mouse next crossed it, then followed the mouse with
+    // no button down (found 2026-10-27).
+    const onMove = (e: PointerEvent): void => {
+      if (!tracking || e.pointerId !== pointerId) { return; }
+      if ((e.buttons & 1) === 0) { end(); return; } // release was missed (left the window, etc.)
       if (!dragging) {
         if (Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) < 6) { return; }
         dragging = true;
-        try { el.setPointerCapture(e.pointerId); } catch { /* stale pointer */ }
         el.classList.add('ikm-dock-dragging');
       }
       const zone = el.parentElement;
@@ -843,34 +872,37 @@ export class DockManager {
           }
         });
       }
-      followPointer(e);
-    });
-    const finish = (e: PointerEvent): void => {
-      if (!tracking) { return; }
-      tracking = false;
-      if (dragging) {
-        dragging = false;
-        el.classList.remove('ikm-dock-dragging');
-        try { el.releasePointerCapture(e.pointerId); } catch { /* already released */ }
-        // Settle: animate the held offset away into the final slot.
-        const settleTx = tx;
-        const settleTy = ty;
-        el.style.transform = '';
-        tx = 0;
-        ty = 0;
-        if ((settleTx || settleTy) && typeof el.animate === 'function') {
-          el.animate(
-            [{ transform: `translate(${settleTx}px, ${settleTy}px) scale(1.05)` }, { transform: 'none' }],
-            { duration: 150, easing: 'ease-out' }
-          );
-        }
-        const zone = el.parentElement;
-        if (zone) { this._persistZoneOrder(zone); }
-        this._dragEndedAt = Date.now();
-      }
+      followPointer(e, isColumn);
     };
-    el.addEventListener('pointerup', finish);
-    el.addEventListener('pointercancel', finish);
+    const onUp = (e: PointerEvent): void => {
+      if (e.pointerId === pointerId) { end(); }
+    };
+    const onBlur = (): void => end();
+    el.addEventListener('pointerdown', (e: PointerEvent) => {
+      if (e.button !== 0) { return; }
+      end(); // a press while a stale drag is open starts afresh
+      tracking = true;
+      dragging = false;
+      pointerId = e.pointerId;
+      sx = e.clientX;
+      sy = e.clientY;
+      const r = el.getBoundingClientRect();
+      startLeft = r.left;
+      startTop = r.top;
+      tx = 0;
+      ty = 0;
+      try { el.setPointerCapture(e.pointerId); } catch { /* stale pointer */ }
+      window.addEventListener('pointermove', onMove, true);
+      window.addEventListener('pointerup', onUp, true);
+      window.addEventListener('pointercancel', onUp, true);
+      window.addEventListener('blur', onBlur);
+      detach = () => {
+        window.removeEventListener('pointermove', onMove, true);
+        window.removeEventListener('pointerup', onUp, true);
+        window.removeEventListener('pointercancel', onUp, true);
+        window.removeEventListener('blur', onBlur);
+      };
+    });
   }
 
   private _renderEntry(entry: IRegistered): void {

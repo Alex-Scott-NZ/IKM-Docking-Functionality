@@ -8,7 +8,7 @@ heading for.
 
 ```bash
 SPFX_TEST_PAGE_MATCH=kc-sandpit/SitePages/Docking node dock-run.mjs [scenarios] [viewports]
-# scenarios: comma-separated name fragments, e.g. "basic,real"; empty = all
+# scenarios: comma-separated name fragments, e.g. "basic,real,pull-out"; empty = all
 # viewports: office-100, office-125, office-150, zoom-200, laptop, 4k-150 (comma-separated)
 ```
 
