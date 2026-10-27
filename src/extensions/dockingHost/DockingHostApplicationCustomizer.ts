@@ -11,6 +11,14 @@ import { DockManager } from './DockManager';
 
 const LOG_SOURCE: string = 'DockingHostApplicationCustomizer';
 
+/** window key holding the page's one running host (see onInit). */
+const SHARED_KEY = '__ikmDockingHost';
+
+interface ISharedHost {
+  manager: DockManager;
+  owners: number;
+}
+
 /**
  * The IKM Docking Host — owns all dock zones, renders minimised utility
  * chips/tabs from registration descriptors, and arbitrates between them.
@@ -21,6 +29,7 @@ export default class DockingHostApplicationCustomizer
 
   private _manager: DockManager | undefined;
   private _bottomPlaceholder: PlaceholderContent | undefined;
+  private _joined: ISharedHost | undefined;
 
   public async onInit(): Promise<void> {
     const props: IDockingHostProperties = this.properties || {};
@@ -36,6 +45,21 @@ export default class DockingHostApplicationCustomizer
         Log.info(LOG_SOURCE, `Site ${siteId} not in allowedSiteIds — not starting.`);
         return;
       }
+    }
+
+    // One host per page. The host can be registered twice on a site (the
+    // tenant catalog's Tenant Wide Extensions row AND a site collection
+    // catalog's row); two managers drew two sets of zones on top of each
+    // other, two back-to-top buttons, and whichever started last owned
+    // window.ikmDock. A second registration joins the running manager and
+    // contributes its per-utility settings instead.
+    const shared = (window as unknown as { [SHARED_KEY]?: ISharedHost })[SHARED_KEY];
+    if (shared && shared.manager.isLive()) {
+      shared.manager.mergeProps(props);
+      shared.owners++;
+      this._joined = shared;
+      Log.info(LOG_SOURCE, 'Host already running on this page: joined it and merged settings.');
+      return;
     }
 
     let themePrimary: string | undefined;
@@ -58,6 +82,9 @@ export default class DockingHostApplicationCustomizer
 
     this._manager = new DockManager(props, themePrimary, this._bottomPlaceholder?.domElement);
     this._manager.start();
+    const own: ISharedHost = { manager: this._manager, owners: 1 };
+    (window as unknown as { [SHARED_KEY]?: ISharedHost })[SHARED_KEY] = own;
+    this._joined = own;
     this._applyVisibility();
 
     this.context.application.navigatedEvent.add(this, () => {
@@ -68,8 +95,18 @@ export default class DockingHostApplicationCustomizer
   }
 
   protected onDispose(): void {
-    this._manager?.dispose();
+    // The manager is shared with any registration that joined it: dispose
+    // it only when the last owner goes.
+    const joined = this._joined;
+    this._joined = undefined;
     this._manager = undefined;
+    if (!joined) { return; }
+    joined.owners--;
+    if (joined.owners <= 0) {
+      joined.manager.dispose();
+      const w = window as unknown as { [SHARED_KEY]?: ISharedHost };
+      if (w[SHARED_KEY] === joined) { delete w[SHARED_KEY]; }
+    }
   }
 
   private _applyVisibility(): void {

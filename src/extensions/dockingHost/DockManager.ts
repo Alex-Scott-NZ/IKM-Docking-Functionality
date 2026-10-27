@@ -23,13 +23,46 @@ const FOOTER_SLOT_ID = 'ikm-dock-bottom-slot';
  */
 const BACK_TO_TOP_MIN_SCROLL_PX = 400;
 const FALLBACK_PRIMARY = '#085a64';
+/** At or below this width edge tabs fold into the bottom row (see _narrowQuery). */
+const NARROW_PX = 1024;
 /**
  * One motion duration for every participant (contract v1.2 host-owned
  * motion). 240ms with a decelerate curve: the old 180ms ease-in packed most
  * of the travel into the last three frames, which read as stutter.
  */
 const DOCK_MOTION_MS = 240;
-const DOCK_MOTION_EASING = 'cubic-bezier(0.2, 0, 0, 1)';
+const DOCK_MOTION_EASING: [number, number, number, number] = [0.2, 0, 0, 1]; // cubic-bezier, decelerate
+
+/**
+ * A CSS cubic-bezier timing function as a JS function of progress 0..1
+ * (Newton steps on x, falling back to bisection).
+ */
+function cubicBezier(x1: number, y1: number, x2: number, y2: number): (t: number) => number {
+  const bx = (u: number): number => 3 * x1 * u * (1 - u) * (1 - u) + 3 * x2 * u * u * (1 - u) + u * u * u;
+  const by = (u: number): number => 3 * y1 * u * (1 - u) * (1 - u) + 3 * y2 * u * u * (1 - u) + u * u * u;
+  const dx = (u: number): number => 3 * x1 * (1 - u) * (1 - u) + 6 * (x2 - x1) * u * (1 - u) + 3 * (1 - x2) * u * u;
+  return (t: number): number => {
+    if (t <= 0) { return 0; }
+    if (t >= 1) { return 1; }
+    let u = t;
+    for (let i = 0; i < 6; i++) {
+      const d = dx(u);
+      if (Math.abs(d) < 1e-6) { break; }
+      const next = u - (bx(u) - t) / d;
+      if (next < 0 || next > 1) { break; }
+      u = next;
+    }
+    if (Math.abs(bx(u) - t) > 1e-4) {
+      let lo = 0;
+      let hi = 1;
+      for (let i = 0; i < 30; i++) {
+        u = (lo + hi) / 2;
+        if (bx(u) < t) { lo = u; } else { hi = u; }
+      }
+    }
+    return by(u);
+  };
+}
 
 interface IRegistered {
   descriptor: IDockDescriptor;
@@ -57,7 +90,7 @@ export class DockManager {
   // Utilities whose minimise proxy is currently in flight: their chip stays
   // invisible (layout kept) until the proxy lands, then pops in — a proper
   // hand-off instead of two things moving at once.
-  private _minimising: Set<string> = new Set<string>();
+  private _minimising: Map<string, number> = new Map<string, number>();
 
   // Last ghost clone per utility, kept from the minimise flight so the
   // RESTORE flight can fly the same image back out (the real UI doesn't
@@ -67,6 +100,25 @@ export class DockManager {
   private _ghostCache: Map<string, HTMLElement> = new Map();
 
   private _bottomHost: HTMLElement | undefined;
+
+  // One rail per screen edge, holding that edge's three clusters (top,
+  // middle, bottom) in a single column so they can never overlap.
+  private _rails: { [side: string]: HTMLElement } = {};
+
+  // Below this width there is no room for edge tabs beside the content, so
+  // edge-docked utilities fold into the bottom row (they used to vanish,
+  // leaving a docked utility unreachable: a 1920px screen at 200% zoom is
+  // 960px wide). Hidden entirely only in edit mode.
+  private _narrowQuery: MediaQueryList | undefined;
+  private _onNarrowChange = (): void => this._rezone();
+  private _onResize = (): void => {
+    if (this._resizeRaf) { return; }
+    this._resizeRaf = window.requestAnimationFrame(() => {
+      this._resizeRaf = 0;
+      this._updateBottomRowOffset();
+    });
+  };
+  private _resizeRaf = 0;
 
   public constructor(props: IDockingHostProperties, themePrimary?: string, bottomHost?: HTMLElement) {
     this._props = props;
@@ -82,6 +134,13 @@ export class DockManager {
     // Capture phase: modern SP scrolls a nested region, not the window,
     // and scroll events don't bubble — capture is the only reliable hook.
     document.addEventListener('scroll', this._onScrollCapture, true);
+    window.addEventListener('resize', this._onResize);
+    if (typeof window.matchMedia === 'function') {
+      this._narrowQuery = window.matchMedia(`(max-width: ${NARROW_PX}px)`);
+      if (this._narrowQuery.addEventListener) {
+        this._narrowQuery.addEventListener('change', this._onNarrowChange);
+      }
+    }
     // The feedback button mounts async (dynamic import) — re-measure the
     // bottom row a few times after start, then keep it fresh on scroll ticks.
     [500, 1500, 4000].forEach((ms) => window.setTimeout(() => this._updateBottomRowOffset(), ms));
@@ -91,8 +150,15 @@ export class DockManager {
   public dispose(): void {
     this._disposed = true;
     document.removeEventListener('scroll', this._onScrollCapture, true);
+    window.removeEventListener('resize', this._onResize);
+    if (this._narrowQuery && this._narrowQuery.removeEventListener) {
+      this._narrowQuery.removeEventListener('change', this._onNarrowChange);
+    }
     if (window.cancelAnimationFrame && this._scrollRaf) {
       window.cancelAnimationFrame(this._scrollRaf);
+    }
+    if (window.cancelAnimationFrame && this._resizeRaf) {
+      window.cancelAnimationFrame(this._resizeRaf);
     }
     if ((window as unknown as { ikmDock?: IIkmDock }).ikmDock) {
       delete (window as unknown as { ikmDock?: IIkmDock }).ikmDock;
@@ -103,6 +169,46 @@ export class DockManager {
     document.getElementById(STYLE_ID)?.remove();
     this._registered.clear();
     this._log('disposed');
+  }
+
+  /** False once disposed: a later registration must start its own host. */
+  public isLive(): boolean {
+    return !this._disposed;
+  }
+
+  /**
+   * A second registration of the host on the same page (tenant row plus a
+   * site collection row) contributes its settings here instead of starting
+   * a second manager. Per utility, a configured entry beats none; where both
+   * configure the same utility the running host's entry stands.
+   */
+  public mergeProps(props: IDockingHostProperties): void {
+    const incoming = props.utilities || {};
+    const utilities = { ...(this._props.utilities || {}) };
+    let changed = false;
+    Object.keys(incoming).forEach((id) => {
+      if (utilities[id]) {
+        this._log(`mergeProps: '${id}' configured twice, keeping the running host's settings`);
+        return;
+      }
+      utilities[id] = incoming[id];
+      changed = true;
+    });
+    this._props = { ...this._props, utilities, debug: !!(this._props.debug || props.debug) };
+    if (!changed) { return; }
+    // Chips that registered before these settings arrived may sit in the
+    // default zone.
+    this._rezone();
+    this._log('mergeProps: settings merged from a second host registration');
+  }
+
+  /** Move every chip whose zone has changed (settings merged, screen narrowed or widened). */
+  private _rezone(): void {
+    this._registered.forEach((entry, id) => {
+      const el = entry.element;
+      if (el && el.parentElement !== this._zoneFor(id)) { this._update(id, {}); }
+    });
+    this._updateBottomRowOffset();
   }
 
   /** Re-evaluate visibility (edit mode toggles, SPA navigation). */
@@ -135,16 +241,36 @@ export class DockManager {
         // stays visible throughout and just pulses when the flight lands:
         // hiding a button the reader could already see reads as a glitch.
         const chipExisted = !!this._registered.get(id)?.element;
-        this._minimising.add(id);
-        this._animate(id, from, this._dockTargetRect(id), () => {
-          this._minimising.delete(id);
-          if (chipExisted) {
-            this._pulseChip(id);
-          } else {
-            this._revealChipAfterFlight(id);
-          }
-          if (done) { done(); }
-        }, source);
+        this._minimising.set(id, (this._minimising.get(id) || 0) + 1);
+        const launch = (): void => {
+          this._animate(id, from, () => this._dockTargetRect(id), () => {
+            const left = (this._minimising.get(id) || 1) - 1;
+            if (left > 0) {
+              this._minimising.set(id, left);
+              return; // a later minimise of the same utility is still flying
+            }
+            this._minimising.delete(id);
+            if (chipExisted) {
+              this._pulseChip(id);
+            } else {
+              this._revealChipAfterFlight(id);
+            }
+            if (done) { done(); }
+          }, source);
+        };
+        if (chipExisted) {
+          launch();
+        } else {
+          // The participant registers in the same turn it calls us, so a
+          // frame later its chip exists (invisible) in its REAL slot. Aim at
+          // that instead of predicting it: a prediction had to guess the new
+          // chip's size from its neighbour, and a tall tab above (feedback)
+          // sent the flight 20-50px past where the tab then appeared.
+          let launched = false;
+          const once = (): void => { if (!launched) { launched = true; launch(); } };
+          window.requestAnimationFrame(once);
+          window.setTimeout(once, 50); // rAF stalls in background tabs
+        }
       },
       animateRestore: (id, to, done, options) => {
         const handOff = !!(options && options.chipHandOff);
@@ -191,8 +317,8 @@ export class DockManager {
     const chip = entry && entry.element;
     if (chip) {
       const r = chip.getBoundingClientRect();
-      if (r.left !== 0 || r.top !== 0 || r.width !== 0 || r.height !== 0) {
-        return { left: r.left, top: r.top, width: Math.max(r.width, 32), height: Math.max(r.height, 32) };
+      if (r.width > 0 && r.height > 0) {
+        return { left: r.left, top: r.top, width: r.width, height: r.height };
       }
     }
     const zone = this._zoneFor(id);
@@ -284,7 +410,7 @@ export class DockManager {
    * GHOST — a clone of the element — instead of a flat theme-coloured slab,
    * so the thing the reader was looking at is what appears to fly.
    */
-  private _animate(id: string, from: IDockRect, to: IDockRect, done?: () => void, source?: Element, layoutAt: 'from' | 'to' = 'from'): void {
+  private _animate(id: string, from: IDockRect, to: IDockRect | (() => IDockRect), done?: () => void, source?: Element, layoutAt: 'from' | 'to' = 'from'): void {
     const finish = (): void => { if (done) { done(); } };
     const reduced = typeof window.matchMedia === 'function' &&
       window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -292,12 +418,13 @@ export class DockManager {
       finish();
       return;
     }
+    const toAtLaunch = typeof to === 'function' ? to() : to;
     // FLIP: the proxy is ALWAYS laid out at the rect where the ghost is
     // full-size (minimise: the source; restore: the destination), and the
     // transform does the shrinking/growing. Laying it out small and scaling
     // UP renders the clone's text into a tiny box first — huge deformed
     // glyphs (seen on restore before this).
-    const layoutRect = layoutAt === 'to' ? to : from;
+    const layoutRect = layoutAt === 'to' ? toAtLaunch : from;
     const proxy = document.createElement('div');
     proxy.className = 'ikm-dock-motion-proxy';
     proxy.setAttribute('aria-hidden', 'true');
@@ -352,26 +479,37 @@ export class DockManager {
       }
     }
     document.body.appendChild(proxy);
-    // Keyframes relative to the layout rect: 'from'-anchored flights go
-    // identity → shrunk-at-destination; 'to'-anchored (restore) START
-    // pre-shrunk at the origin and grow to identity.
-    let startTransform: string;
-    let endTransform: string;
-    if (layoutAt === 'to') {
-      const sx0 = Math.max(from.width / to.width, 0.01);
-      const sy0 = Math.max(from.height / to.height, 0.01);
-      const tx0 = (from.left + from.width / 2) - (to.left + to.width / 2);
-      const ty0 = (from.top + from.height / 2) - (to.top + to.height / 2);
-      startTransform = `translate(${tx0}px, ${ty0}px) scale(${sx0}, ${sy0})`;
-      endTransform = 'translate(0px, 0px) scale(1, 1)';
-    } else {
-      const sx = Math.max(to.width / from.width, 0.01);
-      const sy = Math.max(to.height / from.height, 0.01);
-      const tx = (to.left + to.width / 2) - (from.left + from.width / 2);
-      const ty = (to.top + to.height / 2) - (from.top + from.height / 2);
-      startTransform = 'translate(0px, 0px) scale(1, 1)';
-      endTransform = `translate(${tx}px, ${ty}px) scale(${sx}, ${sy})`;
-    }
+    // Minimise: fade away as it departs. Restore: gain presence as it
+    // arrives (the real UI takes over the moment it lands).
+    const opacities = layoutAt === 'to'
+      ? { start: 0.35, end: Math.max(startOpacity, 0.9) }
+      : { start: startOpacity, end: 0.15 };
+    const ease = cubicBezier(...DOCK_MOTION_EASING);
+    const lerp = (a: number, b: number, k: number): number => a + (b - a) * k;
+    const cx = (r: IDockRect): number => r.left + r.width / 2;
+    const cy = (r: IDockRect): number => r.top + r.height / 2;
+    // Driven frame by frame rather than by fixed keyframes so the flight
+    // HOMES: the destination is re-read every frame. A slot moves while a
+    // flight is in the air whenever something else changes at once (several
+    // utilities docking together, a cluster re-centring, a resize or
+    // scroll); fixed keyframes landed where the slot WAS and the chip then
+    // popped in somewhere else. Transform-only, so still compositor-cheap.
+    const frame = (k: number): void => {
+      const dest = typeof to === 'function' ? to() : to;
+      const e = ease(k);
+      let tf: string;
+      if (layoutAt === 'to') {
+        // Laid out at the destination, starting pre-shrunk at the origin.
+        tf = `translate(${lerp(cx(from) - cx(dest), 0, e)}px, ${lerp(cy(from) - cy(dest), 0, e)}px) ` +
+          `scale(${lerp(Math.max(from.width / dest.width, 0.01), 1, e)}, ${lerp(Math.max(from.height / dest.height, 0.01), 1, e)})`;
+      } else {
+        // Laid out at the source, shrinking onto the (live) destination.
+        tf = `translate(${lerp(0, cx(dest) - cx(from), e)}px, ${lerp(0, cy(dest) - cy(from), e)}px) ` +
+          `scale(${lerp(1, Math.max(dest.width / from.width, 0.01), e)}, ${lerp(1, Math.max(dest.height / from.height, 0.01), e)})`;
+      }
+      proxy.style.transform = tf;
+      proxy.style.opacity = String(lerp(opacities.start, opacities.end, e));
+    };
     let ended = false;
     const end = (): void => {
       if (ended) { return; }
@@ -379,30 +517,17 @@ export class DockManager {
       proxy.remove();
       finish();
     };
-    // Web Animations API rather than a CSS transition: it starts on a
-    // deterministic first frame (no create-reflow-then-transition race that
-    // could eat the opening frames on a busy page) and reports completion
-    // directly.
-    if (typeof proxy.animate === 'function') {
-      // Minimise: fade away as it departs. Restore: gain presence as it
-      // arrives (the real UI takes over the moment it lands).
-      const opacities = layoutAt === 'to'
-        ? { start: 0.35, end: Math.max(startOpacity, 0.9) }
-        : { start: startOpacity, end: 0.15 };
-      const anim = proxy.animate(
-        [
-          { transform: startTransform, opacity: opacities.start },
-          { transform: endTransform, opacity: opacities.end }
-        ],
-        { duration: DOCK_MOTION_MS, easing: DOCK_MOTION_EASING, fill: 'forwards' }
-      );
-      anim.onfinish = end;
-    } else {
-      // Ancient engine without WAAPI: no flight, just the state change.
-      end();
-      return;
-    }
-    window.setTimeout(end, DOCK_MOTION_MS + 150); // safety net
+    frame(0); // correct from the very first paint
+    const t0 = performance.now();
+    const tick = (now: number): void => {
+      if (ended) { return; }
+      const k = Math.min(1, Math.max(0, (now - t0) / DOCK_MOTION_MS));
+      frame(k);
+      if (k >= 1) { end(); return; }
+      window.requestAnimationFrame(tick);
+    };
+    window.requestAnimationFrame(tick);
+    window.setTimeout(end, DOCK_MOTION_MS + 150); // safety net (rAF stalls in background tabs)
   }
 
   private _register(d: IDockDescriptor): void {
@@ -416,10 +541,12 @@ export class DockManager {
       this._log(`register ignored — '${d.id}' disabled by config`);
       return;
     }
-    this._unregister(d.id); // idempotent re-register
     const entry: IRegistered = { descriptor: d, element: undefined };
-    this._registered.set(d.id, entry);
-    this._renderEntry(entry);
+    this._slideNeighbours(() => {
+      this._unregister(d.id, true); // idempotent re-register
+      this._registered.set(d.id, entry);
+      this._renderEntry(entry);
+    }, () => entry.element);
     this._applyArbitration();
     // The row just changed width — re-nudge the legacy feedback bar NOW.
     // The nudge otherwise runs only on scroll ticks, so a chip appearing
@@ -429,11 +556,14 @@ export class DockManager {
     this._log(`registered '${d.id}'`);
   }
 
-  private _unregister(id: string): void {
+  private _unregister(id: string, inPlace?: boolean): void {
     const entry = this._registered.get(id);
     if (!entry) { return; }
-    entry.element?.remove();
-    this._registered.delete(id);
+    const remove = (): void => {
+      entry.element?.remove();
+      this._registered.delete(id);
+    };
+    if (inPlace) { remove(); } else { this._slideNeighbours(remove); }
     this._applyArbitration();
     this._updateBottomRowOffset(); // row narrowed — see _register
     this._log(`unregistered '${id}'`);
@@ -447,6 +577,37 @@ export class DockManager {
     entry.element = undefined;
     this._renderEntry(entry);
     this._applyArbitration();
+  }
+
+  /**
+   * Run a change that adds or removes a chip, and let every OTHER chip that
+   * moved because of it slide from its old slot to its new one (FLIP), the
+   * same way neighbours make room during a drag. Without this the row
+   * snapped sideways the instant a chip left, which read as a jump; on an
+   * edge rail a cluster growing or shrinking re-centres every tab in it.
+   */
+  private _slideNeighbours(change: () => void, added?: () => HTMLElement | undefined): void {
+    const chips = (): HTMLElement[] =>
+      Array.prototype.slice.call(document.querySelectorAll('[data-ikm-dock-id]')) as HTMLElement[];
+    const before = new Map<HTMLElement, DOMRect>();
+    chips().forEach((c) => before.set(c, c.getBoundingClientRect()));
+    change();
+    const newcomer = added ? added() : undefined;
+    const reduced = typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduced) { return; }
+    chips().forEach((c) => {
+      const was = before.get(c);
+      if (!was || c === newcomer || typeof c.animate !== 'function') { return; }
+      const now = c.getBoundingClientRect();
+      const dx = was.left - now.left;
+      const dy = was.top - now.top;
+      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) { return; }
+      c.animate(
+        [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }],
+        { duration: 180, easing: 'cubic-bezier(0.2, 0, 0, 1)' }
+      );
+    });
   }
 
   private _getSettings(id: string): IDockableUtilitySettings | undefined {
@@ -480,13 +641,22 @@ export class DockManager {
     if (this._bottomHost) { this._bottomHost.classList.add('ikm-dock-bottom-host'); }
     this._zones['bottom-left'] = mk('ikm-dock-zone-bottom ikm-dock-left', bottomParent);
     this._zones['bottom-right'] = mk('ikm-dock-zone-bottom ikm-dock-right', bottomParent);
-    this._zones['edge-left'] = mk('ikm-dock-zone-edge ikm-dock-left', root);
-    this._zones['edge-right'] = mk('ikm-dock-zone-edge ikm-dock-right', root);
+    // Each edge is one rail: top cluster, flexible gap, middle cluster,
+    // flexible gap, bottom cluster. The gaps give way first when space runs
+    // short, then the tabs shrink (labels truncate), so the clusters can't
+    // overlap the way independently positioned ones did on short windows.
+    ['left', 'right'].forEach((side) => {
+      const rail = mk(`ikm-dock-rail ikm-dock-${side}`, root);
+      this._rails[side] = rail;
+      this._zones[`edge-${side}:top`] = mk(`ikm-dock-zone-edge ikm-dock-${side} ikm-dock-edge-top`, rail);
+      mk('ikm-dock-rail-gap ikm-dock-rail-gap-upper', rail);
+      this._zones[`edge-${side}`] = mk(`ikm-dock-zone-edge ikm-dock-${side}`, rail);
+      mk('ikm-dock-rail-gap ikm-dock-rail-gap-lower', rail);
+      this._zones[`edge-${side}:bottom`] = mk(`ikm-dock-zone-edge ikm-dock-${side} ikm-dock-edge-bottom`, rail);
+    });
     // Zone keys on the elements — the reader's drag-reorder store is keyed
     // by these (see _persistZoneOrder / _applyReaderOrder).
-    ['bottom-left', 'bottom-right', 'edge-left', 'edge-right'].forEach((k) =>
-      this._zones[k].setAttribute('data-ikm-zone', k)
-    );
+    Object.keys(this._zones).forEach((k) => this._zones[k].setAttribute('data-ikm-zone', k));
     document.body.appendChild(root);
     this._root = root;
   }
@@ -494,12 +664,16 @@ export class DockManager {
   private _zoneFor(id: string): HTMLElement {
     const s = this._getSettings(id);
     const target = s ? s.minimiseTarget : 'bottom';
-    if (target === 'edge-left' || target === 'edge-right') {
+    if ((target === 'edge-left' || target === 'edge-right') && !this._isNarrow()) {
       return this._edgeZone(target, (s && s.edgeAlign) || 'middle');
     }
     // 'bottom' and (for now) 'user-choice' land in a bottom slot.
     const side = s && s.bottomSide === 'left' ? 'bottom-left' : 'bottom-right';
     return this._zones[side];
+  }
+
+  private _isNarrow(): boolean {
+    return !!(this._narrowQuery && this._narrowQuery.matches);
   }
 
   /**
@@ -508,18 +682,7 @@ export class DockManager {
    * top/bottom variants are created lazily, styled by the align class.
    */
   private _edgeZone(target: 'edge-left' | 'edge-right', align: 'top' | 'middle' | 'bottom'): HTMLElement {
-    if (align === 'middle') { return this._zones[target]; }
-    const key = `${target}:${align}`;
-    if (!this._zones[key]) {
-      const base = this._zones[target];
-      const el = document.createElement('div');
-      const side = target === 'edge-left' ? 'ikm-dock-left' : 'ikm-dock-right';
-      el.className = `ikm-dock-zone-edge ${side} ikm-dock-edge-${align}`;
-      el.setAttribute('data-ikm-zone', key);
-      (base.parentElement || document.body).appendChild(el);
-      this._zones[key] = el;
-    }
-    return this._zones[key];
+    return this._zones[align === 'middle' ? target : `${target}:${align}`];
   }
 
   private _priorityOf(entry: IRegistered): number {
@@ -767,10 +930,15 @@ export class DockManager {
     this._applyReaderOrder(zone);
     // Entrance motion: start shrunken/low, release next frame (the shared
     // transition rule animates it in; reduced-motion kills transitions).
-    el.classList.add('ikm-dock-enter');
-    window.requestAnimationFrame(() =>
-      window.requestAnimationFrame(() => el.classList.remove('ikm-dock-enter'))
-    );
+    // Not for a chip whose minimise flight is still coming: it stays hidden
+    // and pops in on landing, and the flight aims at its rect, which must be
+    // its real slot rather than a shrunken, lowered one.
+    if (!el.classList.contains('ikm-dock-preflight')) {
+      el.classList.add('ikm-dock-enter');
+      const release = (): void => el.classList.remove('ikm-dock-enter');
+      window.requestAnimationFrame(() => window.requestAnimationFrame(release));
+      window.setTimeout(release, 300); // rAF stalls in background tabs
+    }
     entry.element = el;
   }
 
@@ -874,12 +1042,7 @@ export class DockManager {
     if (!zone) { return; }
     const rightPx = `${this._scrollbarClearancePx()}px`;
     if (zone.style.right !== rightPx) { zone.style.right = rightPx; }
-    // All right-edge zones (base + lazily created top/bottom clusters).
-    Object.keys(this._zones).forEach((k) => {
-      if (k.indexOf('edge-right') !== 0) { return; }
-      const z = this._zones[k];
-      if (z && z.style.right !== rightPx) { z.style.right = rightPx; }
-    });
+    this._positionRails(rightPx);
     const zRect = zone.getBoundingClientRect();
     if (zRect.width === 0) { return; }
     const clearRight = Math.round(window.innerWidth - zRect.left + 8);
@@ -892,6 +1055,26 @@ export class DockManager {
       const px = `${clearRight}px`;
       if (el.style.right !== px) { el.style.right = px; }
     }
+  }
+
+  /**
+   * Edge rails run from just below the suite bar to 10% off the bottom.
+   * The left rail starts right of SharePoint's app bar (tabs used to cover
+   * its Discover/Publish buttons); the right rail clears the scrollbar.
+   */
+  private _positionRails(rightPx: string): void {
+    const right = this._rails.right;
+    const left = this._rails.left;
+    if (!right || !left) { return; }
+    if (right.style.right !== rightPx) { right.style.right = rightPx; }
+    const suite = document.getElementById('SuiteNavWrapper') || document.getElementById('SuiteNavPlaceHolder');
+    const suiteBottom = suite ? suite.getBoundingClientRect().bottom : 0;
+    const top = `${Math.round(Math.max(window.innerHeight * 0.1, suiteBottom + 8))}px`;
+    [left, right].forEach((r) => { if (r.style.top !== top) { r.style.top = top; } });
+    const appBar = document.getElementById('sp-appBar');
+    const ab = appBar ? appBar.getBoundingClientRect() : undefined;
+    const leftPx = `${ab && ab.width > 0 && ab.left < 80 ? Math.round(ab.right) : 0}px`;
+    if (left.style.left !== leftPx) { left.style.left = leftPx; }
   }
 
   private _setBackToTopScrolled(past: boolean): void {
@@ -946,11 +1129,16 @@ export class DockManager {
 .ikm-dock-zone-bottom { position: fixed; bottom: 2px; z-index: ${DOCK_Z_INDEX}; display: flex; gap: 8px; align-items: center; }
 .ikm-dock-zone-bottom.ikm-dock-left { left: 20px; }
 .ikm-dock-zone-bottom.ikm-dock-right { right: 20px; flex-direction: row-reverse; }
-.ikm-dock-zone-edge { position: fixed; top: 25%; z-index: ${DOCK_Z_INDEX}; display: flex; flex-direction: column; gap: 8px; }
-.ikm-dock-zone-edge.ikm-dock-left { left: 0; }
-.ikm-dock-zone-edge.ikm-dock-right { right: 0; }
-.ikm-dock-zone-edge.ikm-dock-edge-top { top: 10%; }
-.ikm-dock-zone-edge.ikm-dock-edge-bottom { top: auto; bottom: 10%; }
+.ikm-dock-rail { position: fixed; top: 10%; bottom: 10%; z-index: ${DOCK_Z_INDEX}; display: flex; flex-direction: column; pointer-events: none; }
+.ikm-dock-rail.ikm-dock-left { left: 0; align-items: flex-start; }
+.ikm-dock-rail.ikm-dock-right { right: 0; align-items: flex-end; }
+.ikm-dock-rail-gap { flex: 1 1 0; min-height: 0; }
+/* The middle cluster sits about a quarter of the way down, as it always has. */
+.ikm-dock-rail-gap-lower { flex-grow: 3; }
+.ikm-dock-zone-edge { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 0 1 auto; pointer-events: auto; }
+.ikm-dock-zone-edge:empty { display: none; }
+.ikm-dock-zone-edge .ikm-dock-tab { flex: 0 1 auto; min-height: 40px; overflow: hidden; }
+.ikm-dock-zone-edge .ikm-dock-label { min-height: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ikm-dock-motion-proxy { position: fixed; z-index: ${DOCK_Z_INDEX + 1}; pointer-events: none; border-radius: 6px; opacity: 0.55; transform-origin: center; will-change: transform, opacity; }
 .ikm-dock-preflight { visibility: hidden !important; }
 .ikm-dock-proxy-card { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; width: 100%; height: 100%; color: #fff; font-size: 15px; font-weight: 600; }
@@ -984,7 +1172,6 @@ export class DockManager {
 .ikm-dock-icon { font-size: 12px; line-height: 1; }
 .ikm-dock-offstage, .ikm-dock-suppressed { opacity: 0; pointer-events: none; transform: translateY(6px); }
 .ikm-dock-enter { opacity: 0; transform: scale(0.5) translateY(16px); }
-@media (max-width: 1024px) { #${ROOT_ID} { display: none !important; } }
 @media (prefers-reduced-motion: reduce) {
   .ikm-dock-chip, .ikm-dock-tab { transition: none; }
 }

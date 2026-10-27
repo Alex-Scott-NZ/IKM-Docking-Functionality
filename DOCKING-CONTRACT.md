@@ -75,9 +75,11 @@ boundary (participants span React 16/17 and several SPFx versions).
   TOC), the host hides its built-in back-to-top chip. This replaces the TOC's
   hashed-class CSS hide hack (`[class*="spfxScrolltotopBtn"]`), which is
   retired when the community extension is retired.
-- **Responsive:** the host hides all docked UI below the mobile breakpoint
-  (matching the TOC's `ms-screen-lg-down` behaviour) and audits total sticky
-  coverage; participants don't implement their own responsive dock rules.
+- **Responsive:** at 1024px wide and below, edge-docked utilities fold into
+  the bottom row instead of hiding (changed 2026-10-27: hiding them left a
+  docked utility unreachable, and a 1920px screen at 200% browser zoom is
+  only 960px wide). Participants don't implement their own responsive dock
+  rules; a docked utility always has a reachable chip outside edit mode.
 - **Edit mode:** all docking UI hidden (SharePoint remounts the canvas and
   editing chrome out-stacks everything).
 - **z-index scale:** defined by the host in one place; the footer (13) and
