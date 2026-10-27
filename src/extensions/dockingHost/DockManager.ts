@@ -25,6 +25,8 @@ const BACK_TO_TOP_MIN_SCROLL_PX = 400;
 const FALLBACK_PRIMARY = '#085a64';
 /** At or below this width edge tabs fold into the bottom row (see _narrowQuery). */
 const NARROW_PX = 1024;
+/** Readers' zone picks for 'user-choice' utilities (contract v1.3), tenant-wide. */
+const PLACE_KEY = 'ikm-dock:place';
 /** How far a dragged chip gives when pulled across its zone, out onto the page. */
 const DRAG_OFF_AXIS_PX = 16;
 /**
@@ -71,6 +73,22 @@ interface IRegistered {
   element: HTMLElement | undefined;
 }
 
+/** Where a utility docks: a zone plus the side/cluster within it. */
+interface IPlacement {
+  target: DockZone;
+  bottomSide: 'left' | 'right';
+  edgeAlign: 'top' | 'middle' | 'bottom';
+}
+
+/** The areas a reader can drop a movable chip on. */
+type DropKey = 'bottom-left' | 'bottom-right' | 'edge-left' | 'edge-right';
+
+interface IDropTarget {
+  key: DropKey;
+  el: HTMLElement;
+  rect: IDockRect;
+}
+
 /**
  * Owns the dock zones, renders all minimised UI from descriptors, arbitrates
  * priorities/capabilities, and exposes window.ikmDock. Vanilla DOM on purpose:
@@ -106,6 +124,9 @@ export class DockManager {
   // One rail per screen edge, holding that edge's three clusters (top,
   // middle, bottom) in a single column so they can never overlap.
   private _rails: { [side: string]: HTMLElement } = {};
+
+  // Drop targets on screen while a movable chip is being dragged.
+  private _drops: IDropTarget[] = [];
 
   // Below this width there is no room for edge tabs beside the content, so
   // edge-docked utilities fold into the bottom row (they used to vanish,
@@ -664,14 +685,193 @@ export class DockManager {
   }
 
   private _zoneFor(id: string): HTMLElement {
-    const s = this._getSettings(id);
-    const target = s ? s.minimiseTarget : 'bottom';
-    if ((target === 'edge-left' || target === 'edge-right') && !this._isNarrow()) {
-      return this._edgeZone(target, (s && s.edgeAlign) || 'middle');
+    const p = this._placement(id);
+    if (p.target !== 'bottom' && !this._isNarrow()) {
+      return this._edgeZone(p.target, p.edgeAlign);
     }
-    // 'bottom' and (for now) 'user-choice' land in a bottom slot.
-    const side = s && s.bottomSide === 'left' ? 'bottom-left' : 'bottom-right';
-    return this._zones[side];
+    return this._zones[p.bottomSide === 'left' ? 'bottom-left' : 'bottom-right'];
+  }
+
+  // ------------------------------------------- reader's choice of zone
+
+  /** Readers may drag this utility to another zone (minimiseTarget 'user-choice'). */
+  private _isMovable(id: string): boolean {
+    if (id === 'back-to-top') { return false; } // pinned to its corner
+    const s = this._getSettings(id);
+    return !!s && s.minimiseTarget === 'user-choice';
+  }
+
+  /** The admin's placement: the configured zone, or the starting zone of a reader's-choice utility. */
+  private _defaultPlacement(id: string): IPlacement {
+    const s = this._getSettings(id);
+    const target: DockZone = !s
+      ? 'bottom'
+      : s.minimiseTarget === 'user-choice' ? (s.defaultTarget || 'bottom') : s.minimiseTarget;
+    return {
+      target,
+      bottomSide: s && s.bottomSide === 'left' ? 'left' : 'right',
+      edgeAlign: (s && s.edgeAlign) || 'middle'
+    };
+  }
+
+  /** Where the utility docks now: the reader's pick when it may move, otherwise the admin's. */
+  private _placement(id: string): IPlacement {
+    if (this._isMovable(id)) {
+      const saved = this._readPlaces()[id];
+      if (saved) { return saved; }
+    }
+    return this._defaultPlacement(id);
+  }
+
+  /**
+   * Readers' picks, one store for the whole tenant (localStorage is per
+   * origin): moving a utility applies on every page, unlike chip ORDER,
+   * which is per page.
+   */
+  private _readPlaces(): { [id: string]: IPlacement } {
+    try {
+      const raw = localStorage.getItem(PLACE_KEY);
+      if (!raw) { return {}; }
+      const parsed = JSON.parse(raw) as { v: number; places: { [id: string]: IPlacement } };
+      return parsed && parsed.v === 1 && parsed.places ? parsed.places : {};
+    } catch { return {}; }
+  }
+
+  private _savePlace(id: string, place: IPlacement | undefined): void {
+    try {
+      const places = this._readPlaces();
+      if (place) { places[id] = place; } else { delete places[id]; }
+      localStorage.setItem(PLACE_KEY, JSON.stringify({ v: 1, places }));
+    } catch { /* storage unavailable: the move lasts until the page reloads */ }
+  }
+
+  /** The drop target a zone belongs to (edge clusters all count as their edge). */
+  private _targetKeyOf(zone: HTMLElement | null): DropKey | undefined {
+    const k = zone ? zone.getAttribute('data-ikm-zone') || '' : '';
+    if (k === 'bottom-left' || k === 'bottom-right') { return k; }
+    if (k.indexOf('edge-left') === 0) { return 'edge-left'; }
+    if (k.indexOf('edge-right') === 0) { return 'edge-right'; }
+    return undefined;
+  }
+
+  private _placementKey(p: IPlacement): DropKey {
+    return p.target === 'bottom' ? (p.bottomSide === 'left' ? 'bottom-left' : 'bottom-right') : p.target;
+  }
+
+  /**
+   * While a movable chip is dragged, every zone it can go to lights up
+   * (like window snap areas). Narrow screens fold the edges into the bottom
+   * row, so only the two bottom areas are offered there.
+   */
+  private _showDropTargets(id: string): void {
+    this._hideDropTargets();
+    if (!this._root) { return; }
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    const px = (v: string): number => parseFloat(v) || 0;
+    const leftX = this._rails.left ? px(this._rails.left.style.left) : 0;
+    const rightX = this._rails.right ? px(this._rails.right.style.right) : 20;
+    const railTop = this._rails.left ? this._rails.left.getBoundingClientRect().top : H * 0.1;
+    const strip = 52;
+    const edgeW = 64;
+    const rects: { [k in DropKey]?: IDockRect } = {
+      'bottom-left': { left: leftX + 8, top: H - strip - 4, width: W / 2 - leftX - 12, height: strip },
+      'bottom-right': { left: W / 2 + 4, top: H - strip - 4, width: W / 2 - rightX - 12, height: strip }
+    };
+    if (!this._isNarrow()) {
+      const edgeH = Math.max(80, H - strip - 16 - railTop);
+      rects['edge-left'] = { left: leftX, top: railTop, width: edgeW, height: edgeH };
+      rects['edge-right'] = { left: W - rightX - edgeW, top: railTop, width: edgeW, height: edgeH };
+    }
+    const names: { [k in DropKey]: string } = {
+      'bottom-left': 'Bottom left', 'bottom-right': 'Bottom right', 'edge-left': 'Left edge', 'edge-right': 'Right edge'
+    };
+    const home = this._placementKey(this._defaultPlacement(id));
+    (Object.keys(rects) as DropKey[]).forEach((k) => {
+      const r = rects[k] as IDockRect;
+      const el = document.createElement('div');
+      el.className = k.indexOf('edge') === 0 ? `ikm-dock-drop ikm-dock-drop-edge ikm-dock-drop-${k}` : 'ikm-dock-drop ikm-dock-drop-bottom';
+      el.setAttribute('aria-hidden', 'true');
+      el.setAttribute('data-ikm-drop', k);
+      el.style.left = `${r.left}px`;
+      el.style.top = `${r.top}px`;
+      el.style.width = `${r.width}px`;
+      el.style.height = `${r.height}px`;
+      const label = document.createElement('span');
+      label.className = 'ikm-dock-drop-label';
+      label.textContent = k === home ? `${names[k]} (default)` : names[k];
+      el.appendChild(label);
+      (this._root as HTMLElement).appendChild(el);
+      this._drops.push({ key: k, el, rect: r });
+    });
+    // Next frame, so they fade in rather than pop.
+    window.requestAnimationFrame(() => this._drops.forEach((d) => d.el.classList.add('ikm-dock-drop-shown')));
+  }
+
+  /** The drop target under (or within reach of) the pointer, lit up; the others dimmed. */
+  private _hitDropTarget(x: number, y: number): DropKey | undefined {
+    const reach = 32;
+    let best: IDropTarget | undefined;
+    let bestDist = Infinity;
+    this._drops.forEach((d) => {
+      const dx = Math.max(d.rect.left - x, 0, x - (d.rect.left + d.rect.width));
+      const dy = Math.max(d.rect.top - y, 0, y - (d.rect.top + d.rect.height));
+      const dist = Math.hypot(dx, dy);
+      if (dist <= reach && dist < bestDist) { best = d; bestDist = dist; }
+    });
+    this._drops.forEach((d) => d.el.classList.toggle('ikm-dock-drop-active', d === best));
+    return best ? best.key : undefined;
+  }
+
+  private _hideDropTargets(): void {
+    this._drops.forEach((d) => d.el.remove());
+    this._drops = [];
+  }
+
+  /**
+   * A movable chip was dropped on another zone: remember the reader's pick,
+   * re-render the chip there at the drop point's place in the order, and
+   * let it glide from where it was let go while the neighbours on both
+   * sides close up and make room.
+   */
+  private _moveTo(id: string, key: DropKey, x: number, y: number, from: DOMRect): void {
+    const current = this._placement(id);
+    const place: IPlacement = key.indexOf('bottom') === 0
+      ? { target: 'bottom', bottomSide: key === 'bottom-left' ? 'left' : 'right', edgeAlign: current.edgeAlign }
+      : {
+        target: key as 'edge-left' | 'edge-right',
+        bottomSide: current.bottomSide,
+        // The admin's cluster when it goes back to its own edge, else the middle.
+        edgeAlign: this._defaultPlacement(id).target === key ? this._defaultPlacement(id).edgeAlign : 'middle'
+      };
+    const def = this._defaultPlacement(id);
+    const isDefault = this._placementKey(def) === key && def.edgeAlign === place.edgeAlign;
+    this._savePlace(id, isDefault ? undefined : place); // back home = forget the pick
+    const entry = this._registered.get(id);
+    if (!entry) { return; }
+    this._slideNeighbours(() => {
+      this._update(id, {});
+      const el = entry.element;
+      const zone = el && el.parentElement;
+      if (!el || !zone) { return; }
+      el.classList.remove('ikm-dock-enter');
+      const isColumn = zone.className.indexOf('ikm-dock-zone-edge') !== -1;
+      this._reorderToPointer(el, zone, isColumn ? y : x, false);
+      this._persistZoneOrder(zone);
+    }, () => entry.element);
+    this._updateBottomRowOffset();
+    const el = entry.element;
+    const reduced = typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (!el || reduced || typeof el.animate !== 'function') { return; }
+    const to = el.getBoundingClientRect();
+    const dx = (from.left + from.width / 2) - (to.left + to.width / 2);
+    const dy = (from.top + from.height / 2) - (to.top + to.height / 2);
+    el.animate(
+      [{ transform: `translate(${dx}px, ${dy}px) scale(0.9)`, opacity: 0.6 }, { transform: 'none', opacity: 1 }],
+      { duration: DOCK_MOTION_MS, easing: `cubic-bezier(${DOCK_MOTION_EASING.join(', ')})` }
+    );
+    this._log(`reader moved '${id}' to ${key}`);
   }
 
   private _isNarrow(): boolean {
@@ -753,25 +953,33 @@ export class DockManager {
   private _dragEndedAt = 0;
 
   private _makeDraggable(el: HTMLElement): void {
+    const id = el.getAttribute('data-ikm-dock-id') || '';
     let tracking = false;
     let dragging = false;
+    let movable = false; // may leave its zone for another (reader's choice)
+    let homeKey: DropKey | undefined;
+    let overKey: DropKey | undefined; // drop target under the pointer
     let pointerId = -1;
     let sx = 0;
     let sy = 0;
+    let lastX = 0;
+    let lastY = 0;
     let startLeft = 0;
     let startTop = 0;
     let tx = 0; // transform currently applied to the held chip
     let ty = 0;
     let detach: (() => void) | undefined; // removes the window listeners of the open drag
 
-    // The held chip follows the pointer 1:1 ALONG its zone. Across the zone
-    // (out onto the page) it only gives a little, rubber-band style: a drag
-    // reorders within the zone, so the chip must never look pulled out of
-    // the dock. Because its DOM slot changes mid-drag (reorders), the
-    // transform is recomputed against its CURRENT layout position:
-    // desired screen pos = start rect + pointer travel.
+    // The held chip follows the pointer 1:1 ALONG its zone. A chip that must
+    // stay in its zone only gives a little across it (out onto the page),
+    // rubber-band style, so it never looks pulled out of the dock; a movable
+    // one follows freely towards the drop targets. Because its DOM slot
+    // changes mid-drag (reorders), the transform is recomputed against its
+    // CURRENT layout position: desired screen pos = start rect + pointer travel.
     const followPointer = (e: PointerEvent, isColumn: boolean): void => {
-      const band = (d: number): number => Math.sign(d) * DRAG_OFF_AXIS_PX * (1 - Math.exp(-Math.abs(d) / DRAG_OFF_AXIS_PX));
+      const band = (d: number): number => movable
+        ? d
+        : Math.sign(d) * DRAG_OFF_AXIS_PX * (1 - Math.exp(-Math.abs(d) / DRAG_OFF_AXIS_PX));
       const dx = isColumn ? band(e.clientX - sx) : e.clientX - sx;
       const dy = isColumn ? e.clientY - sy : band(e.clientY - sy);
       const r = el.getBoundingClientRect();
@@ -787,25 +995,31 @@ export class DockManager {
       tracking = false;
       if (detach) { detach(); detach = undefined; }
       try { el.releasePointerCapture(pointerId); } catch { /* already released */ }
-      if (dragging) {
-        dragging = false;
-        el.classList.remove('ikm-dock-dragging');
-        // Settle: animate the held offset away into the final slot.
-        const settleTx = tx;
-        const settleTy = ty;
-        el.style.transform = '';
-        tx = 0;
-        ty = 0;
-        if ((settleTx || settleTy) && typeof el.animate === 'function') {
-          el.animate(
-            [{ transform: `translate(${settleTx}px, ${settleTy}px) scale(1.05)` }, { transform: 'none' }],
-            { duration: 150, easing: 'ease-out' }
-          );
-        }
-        const zone = el.parentElement;
-        if (zone) { this._persistZoneOrder(zone); }
-        this._dragEndedAt = Date.now();
+      if (!dragging) { return; }
+      dragging = false;
+      this._dragEndedAt = Date.now();
+      const heldAt = el.getBoundingClientRect();
+      const dropKey = overKey;
+      this._hideDropTargets();
+      el.classList.remove('ikm-dock-dragging');
+      el.style.transform = '';
+      const settleTx = tx;
+      const settleTy = ty;
+      tx = 0;
+      ty = 0;
+      if (movable && dropKey && dropKey !== homeKey) {
+        this._moveTo(id, dropKey, lastX, lastY, heldAt);
+        return;
       }
+      // Settle: animate the held offset away into the final slot.
+      if ((settleTx || settleTy) && typeof el.animate === 'function') {
+        el.animate(
+          [{ transform: `translate(${settleTx}px, ${settleTy}px) scale(1.05)` }, { transform: 'none' }],
+          { duration: 150, easing: 'ease-out' }
+        );
+      }
+      const zone = el.parentElement;
+      if (zone) { this._persistZoneOrder(zone); }
     };
 
     // Move/up are heard on the WINDOW, not the chip. Listening on the chip
@@ -820,57 +1034,19 @@ export class DockManager {
         if (Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) < 6) { return; }
         dragging = true;
         el.classList.add('ikm-dock-dragging');
+        movable = this._isMovable(id);
+        homeKey = this._targetKeyOf(el.parentElement);
+        if (movable) { this._showDropTargets(id); }
       }
+      lastX = e.clientX;
+      lastY = e.clientY;
       const zone = el.parentElement;
       if (!zone) { return; }
       const isColumn = zone.className.indexOf('ikm-dock-zone-edge') !== -1;
-      // Visual order is what the reader sees; DOM order equals it EXCEPT in
-      // the row-reverse bottom-right zone. Work entirely in visual space,
-      // then write the DOM in whichever direction the zone flows.
-      const reversed = window.getComputedStyle(zone).flexDirection.indexOf('reverse') !== -1;
-      const pointerPos = isColumn ? e.clientY : e.clientX;
-      const movable = (Array.prototype.slice.call(zone.children) as HTMLElement[])
-        .filter((c) => c !== el && c.getAttribute('data-ikm-dock-id') !== 'back-to-top');
-      const pinned = (Array.prototype.slice.call(zone.children) as HTMLElement[])
-        .filter((c) => c.getAttribute('data-ikm-dock-id') === 'back-to-top');
-      const visual = movable
-        .map((s) => {
-          const r = s.getBoundingClientRect();
-          return { s, mid: isColumn ? r.top + r.height / 2 : r.left + r.width / 2 };
-        })
-        .sort((a, b) => a.mid - b.mid)
-        .map((x) => x.s);
-      let insertAt = visual.length;
-      for (let i = 0; i < visual.length; i++) {
-        const r = visual[i].getBoundingClientRect();
-        const mid = isColumn ? r.top + r.height / 2 : r.left + r.width / 2;
-        if (pointerPos < mid) { insertAt = i; break; }
-      }
-      visual.splice(insertAt, 0, el);
-      const domOrder = reversed ? visual.slice().reverse() : visual;
-      // Pinned (back-to-top) re-appended first = stays DOM-first = keeps the
-      // corner in the row-reverse zone.
-      const desired = pinned.concat(domOrder);
-      const currentIds = (Array.prototype.slice.call(zone.children) as HTMLElement[])
-        .map((c) => c.getAttribute('data-ikm-dock-id')).join('|');
-      const desiredIds = desired.map((c) => c.getAttribute('data-ikm-dock-id')).join('|');
-      if (currentIds !== desiredIds) {
-        // FLIP the displaced siblings: capture where they were, reorder the
-        // DOM, then let each one visibly slide from old slot to new.
-        const others = movable.concat(pinned);
-        const before = others.map((o) => ({ o, r: o.getBoundingClientRect() }));
-        desired.forEach((n) => zone.appendChild(n));
-        before.forEach(({ o, r }) => {
-          const a = o.getBoundingClientRect();
-          const dx = r.left - a.left;
-          const dy = r.top - a.top;
-          if ((dx || dy) && typeof o.animate === 'function') {
-            o.animate(
-              [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }],
-              { duration: 150, easing: 'ease-out' }
-            );
-          }
-        });
+      overKey = movable ? this._hitDropTarget(e.clientX, e.clientY) : homeKey;
+      // Reorder only while over its own zone; over another it is moving.
+      if (overKey === homeKey) {
+        this._reorderToPointer(el, zone, isColumn ? e.clientY : e.clientX, true);
       }
       followPointer(e, isColumn);
     };
@@ -878,11 +1054,13 @@ export class DockManager {
       if (e.pointerId === pointerId) { end(); }
     };
     const onBlur = (): void => end();
+
     el.addEventListener('pointerdown', (e: PointerEvent) => {
       if (e.button !== 0) { return; }
       end(); // a press while a stale drag is open starts afresh
       tracking = true;
       dragging = false;
+      overKey = undefined;
       pointerId = e.pointerId;
       sx = e.clientX;
       sy = e.clientY;
@@ -902,6 +1080,62 @@ export class DockManager {
         window.removeEventListener('pointercancel', onUp, true);
         window.removeEventListener('blur', onBlur);
       };
+    });
+  }
+
+  /**
+   * Put `el` at the pointer's place among its zone's chips (`pointerPos` is
+   * clientX in a row, clientY in a column). With `animateOthers`, displaced
+   * siblings slide from their old slot to their new one (FLIP).
+   */
+  private _reorderToPointer(el: HTMLElement, zone: HTMLElement, pointerPos: number, animateOthers: boolean): void {
+    const isColumn = zone.className.indexOf('ikm-dock-zone-edge') !== -1;
+    // Visual order is what the reader sees; DOM order equals it EXCEPT in
+    // the row-reverse bottom-right zone. Work entirely in visual space,
+    // then write the DOM in whichever direction the zone flows.
+    const reversed = window.getComputedStyle(zone).flexDirection.indexOf('reverse') !== -1;
+    const movable = (Array.prototype.slice.call(zone.children) as HTMLElement[])
+      .filter((c) => c !== el && c.getAttribute('data-ikm-dock-id') !== 'back-to-top');
+    const pinned = (Array.prototype.slice.call(zone.children) as HTMLElement[])
+      .filter((c) => c.getAttribute('data-ikm-dock-id') === 'back-to-top');
+    const visual = movable
+      .map((s) => {
+        const r = s.getBoundingClientRect();
+        return { s, mid: isColumn ? r.top + r.height / 2 : r.left + r.width / 2 };
+      })
+      .sort((a, b) => a.mid - b.mid)
+      .map((x) => x.s);
+    let insertAt = visual.length;
+    for (let i = 0; i < visual.length; i++) {
+      const r = visual[i].getBoundingClientRect();
+      const mid = isColumn ? r.top + r.height / 2 : r.left + r.width / 2;
+      if (pointerPos < mid) { insertAt = i; break; }
+    }
+    visual.splice(insertAt, 0, el);
+    const domOrder = reversed ? visual.slice().reverse() : visual;
+    // Pinned (back-to-top) re-appended first = stays DOM-first = keeps the
+    // corner in the row-reverse zone.
+    const desired = pinned.concat(domOrder);
+    const currentIds = (Array.prototype.slice.call(zone.children) as HTMLElement[])
+      .map((c) => c.getAttribute('data-ikm-dock-id')).join('|');
+    const desiredIds = desired.map((c) => c.getAttribute('data-ikm-dock-id')).join('|');
+    if (currentIds === desiredIds) { return; }
+    // FLIP the displaced siblings: capture where they were, reorder the
+    // DOM, then let each one visibly slide from old slot to new.
+    const others = movable.concat(pinned);
+    const before = others.map((o) => ({ o, r: o.getBoundingClientRect() }));
+    desired.forEach((n) => zone.appendChild(n));
+    if (!animateOthers) { return; }
+    before.forEach(({ o, r }) => {
+      const a = o.getBoundingClientRect();
+      const dx = r.left - a.left;
+      const dy = r.top - a.top;
+      if ((dx || dy) && typeof o.animate === 'function') {
+        o.animate(
+          [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }],
+          { duration: 150, easing: 'ease-out' }
+        );
+      }
     });
   }
 
@@ -1177,6 +1411,32 @@ export class DockManager {
 .ikm-dock-proxy-card .ms-Icon { font-size: 28px; }
 .ikm-dock-chip, .ikm-dock-tab { touch-action: none; }
 .ikm-dock-dragging { opacity: 0.8; cursor: grabbing; z-index: 5; position: relative; transition: none !important; }
+/* Drop targets while a reader's-choice chip is dragged: every zone it can go
+   to, faint; the one under the pointer, strong. Under the chips (z - 1). */
+.ikm-dock-drop {
+  position: fixed; z-index: ${DOCK_Z_INDEX - 1}; box-sizing: border-box; pointer-events: none;
+  display: flex; align-items: center; justify-content: center;
+  border: 2px dashed var(--ikm-dock-primary); border-radius: 8px;
+  background: color-mix(in srgb, var(--ikm-dock-primary) 12%, rgba(255, 255, 255, 0.35));
+  opacity: 0; transition: opacity 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+}
+.ikm-dock-drop-shown { opacity: 1; }
+.ikm-dock-drop-active {
+  border-style: solid;
+  background: color-mix(in srgb, var(--ikm-dock-primary) 28%, rgba(255, 255, 255, 0.35));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ikm-dock-primary) 18%, transparent);
+}
+.ikm-dock-drop-label {
+  font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px; font-weight: 600;
+  color: var(--ikm-dock-primary); background: rgba(255, 255, 255, 0.92);
+  padding: 3px 8px; border-radius: 4px; white-space: nowrap;
+}
+/* Edge labels sit low and on the inner side, clear of the tabs on the edge. */
+.ikm-dock-drop-edge { align-items: flex-end; padding-bottom: 12px; }
+.ikm-dock-drop-edge-left { justify-content: flex-end; padding-right: 4px; }
+.ikm-dock-drop-edge-right { justify-content: flex-start; padding-left: 4px; }
+.ikm-dock-drop-edge .ikm-dock-drop-label { writing-mode: vertical-rl; padding: 8px 3px; }
+@media (prefers-reduced-motion: reduce) { .ikm-dock-drop { transition: none; } }
 .ikm-dock-land { animation: ikmDockLand 160ms ease-out; }
 @keyframes ikmDockLand { from { transform: scale(0.6); opacity: 0.4; } to { transform: scale(1); opacity: 1; } }
 .ikm-dock-pulse { animation: ikmDockPulse 220ms ease-out; }

@@ -103,17 +103,29 @@ interface IDockingHostProperties {
 interface IDockableUtilitySettings {
   enabled: boolean;
   minimiseTarget: 'bottom' | 'edge-left' | 'edge-right' | 'user-choice';
-  bottomSide: 'left' | 'right';  // slot when target is bottom
+  defaultTarget?: 'bottom' | 'edge-left' | 'edge-right'; // v1.3: start of a user-choice utility
+  bottomSide: 'left' | 'right';  // slot when target (or defaultTarget) is bottom
   defaultState: 'expanded' | 'minimised';
   priority?: number;             // overrides the reserved default
 }
 ```
 
-- `user-choice`: the participant's minimise control opens a menu (mirroring
-  Copilot's): *Dock left / Dock right / Minimise to footer*. The user's pick is
-  stored per utility in `localStorage` (`ikm-dock:<id>`, versioned `{v: 1, ...}`
-  schema, global not per-page — the TOC prefs precedent) and wins over the
-  configured default thereafter.
+- `user-choice` (contract v1.3, host 0.1.0.25+): readers move the utility
+  themselves by **dragging its chip/tab to another zone**. While they drag,
+  every zone it can go to lights up (bottom bar left, bottom bar right, left
+  edge, right edge; only the two bottom areas on screens 1024px wide or less,
+  where edges fold into the bottom row) and the one under the pointer goes
+  solid; letting go anywhere else springs it back. It starts at
+  `defaultTarget` (+ `bottomSide` / `edgeAlign`) until the reader moves it.
+  The pick is stored by the HOST in `localStorage['ikm-dock:place']`
+  (`{v: 1, places: {<id>: {target, bottomSide, edgeAlign}}}`), which is per
+  origin, so it applies on every site in the tenant; dragging it back to its
+  starting zone deletes the entry. Participants need no code for this: they
+  never read `minimiseTarget`. (Superseded: the earlier idea of a menu on the
+  participant's minimise control.)
+- Utilities with a fixed `minimiseTarget` can still be reordered within their
+  zone (per page) but cannot leave it: dragged across the zone they give
+  about 16px and spring back.
 - Edited only by the Extension Manager Admin webpart's "Docking & Utilities"
   section (standard `_fetch`/`_save` pair against the host's row).
 

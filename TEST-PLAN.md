@@ -60,8 +60,24 @@ bottom clusters)**, each with three items docked.
 | X9 | Switch to another tab mid-animation, then come back | Nothing frozen half-way |
 | X10 | Grab a docked tab and pull it straight out onto the page, quickly (a flick) and slowly, and let go out there. Then move the mouse back over the tab without pressing | While held it only gives a little; on letting go it springs back to its slot; it never follows the mouse with no button down; one click still opens it |
 
+### Readers moving a utility (Reader's choice)
+Utilities set to Reader's choice can be dragged to another zone. On kc-sandpit
+`zt-uc-a` (starts bottom left), `zt-uc-b` (starts on the left edge), feedback
+and the contents (both start on the right edge) are set up this way.
+
+| # | Do | Expect |
+|---|----|--------|
+| M1 | Start dragging a Reader's-choice tab | Every area it can go to lights up, its starting area marked "(default)": four areas on a wide screen, the two bottom ones at 1024px wide or less |
+| M2 | Drag it over each area in turn | Only the area under the pointer goes solid |
+| M3 | Drop it on each area, then open and close it after each move | It lands in that area where it was dropped, the others close up and make room, and closing it later brings it back to the new area |
+| M4 | Reload, and visit another page | It is still where the reader put it |
+| M5 | Drop it back on its starting area | It goes back, and the saved choice is cleared |
+| M6 | Let go on the page away from every area, or flick it out quickly | It springs back to where it was |
+| M7 | Drag a utility that is NOT Reader's choice | No areas light up; it only reorders within its own zone |
+| M8 | Move a tab to an edge, then narrow the window below 1024px and widen it again | It folds into the bottom row, then returns to the edge |
+
 ### Screens and zoom
-Run B1, B4, X6 and X10 at each size. These are the CSS pixels the page actually
+Run B1, B4, X6, X10 and M1-M3 at each size. These are the CSS pixels the page actually
 gets; browser zoom and Windows scaling both shrink them.
 
 | Name | Page size | Real-world setup |
@@ -97,3 +113,4 @@ playground page open (see the `spfx-live-test` skill). Results go to
 | 2026-10-27 | 0.1.0.18 (baseline) | Fails | Two hosts on kc-sandpit (tenant + site registrations both ran), two overlapping back-to-top buttons; edge clusters overlap on short windows; left tabs cover SharePoint's app bar; right-edge flights land 22-48px off the tab; at 960px wide every edge-docked utility unreachable (feedback vanished). |
 | 2026-10-27 | 0.1.0.21 | 29/29 at office-100; 93/95 across the other five sizes, the 2 being contents tests that cannot run below 1024px (now marked n/a) | Second registration joins the running host; one rail per edge; flights home on the real slot; neighbours slide on add/remove; edge tabs fold into the bottom row at 1024px and below. |
 | 2026-10-27 | 0.1.0.24 | X10 (pull-out) passes in every zone at every size; full suite 191/202 on the first run, all 11 failures intermittent | Fixed: a quick pull of a tab out onto the page left it "held", following the mouse with no button down, and a click then only put it back (did not open it). Tabs now only give 16px when pulled off the dock. The intermittent failures are FLIGHT-MISS after an interrupted animation (rapid restore/minimise, scroll or resize mid-flight, three docked at once after a reload). An A/B with the old drag code (deployed as 0.1.0.23) failed the same cases at the same rate, so they were already there: the earlier clean 29/29 was a lucky run. "Restore then minimise mid-flight" is a race only the runner can create (a reader cannot press minimise before the restored panel is on screen). |
+| 2026-10-28 | 0.1.0.26 | Full suite 226/230 at all six sizes; every Reader's-choice test (M1-M8) passes | Reader's choice: drag a tab to another zone, areas light up while dragging, choice kept across pages and reloads. The 4 failures are the known intermittent FLIGHT-MISS kinds (3 the runner-only restore-then-minimise race, 1 three docking at once after a reload at 200%). |

@@ -105,6 +105,33 @@ async function pullOut(id, stepPx) {
   for (let d = 4; d <= 200; d += 4) { await mouse('mouseMoved', a.x + out[0] * d + out[1] * 0, a.y + out[1] * d + 30 * out[0]); await sleep(16); }
   await mouse('mouseMoved', 5, 5);
 }
+// Drag chip `id` towards drop target `key` (bottom-left, bottom-right,
+// edge-left, edge-right) or, with key 'page', to the middle of the page, and
+// let go. Returns what was on screen just before letting go: the drop
+// targets offered and which one was lit.
+async function dragToZone(id, key) {
+  const a = await center(id);
+  await mouse('mouseMoved', a.x, a.y);
+  await mouse('mousePressed', a.x, a.y, 1);
+  const vw = await ev('innerWidth'), vh = await ev('innerHeight');
+  // Start the drag towards the middle of the page, where targets appear.
+  const mid = { x: vw / 2, y: vh / 2 };
+  const step = async (from, to, n) => { for (let i = 1; i <= n; i++) { await mouse('mouseMoved', from.x + (to.x - from.x) * i / n, from.y + (to.y - from.y) * i / n, 1); await sleep(16); } };
+  await step(a, mid, 20);
+  let dest = mid;
+  if (key !== 'page') {
+    const r = await ev(`(() => { const e = document.querySelector('[data-ikm-drop="${key}"]'); if (!e) return null; const b = e.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; })()`);
+    // Not offered (e.g. an edge on a narrow screen): aim where it would be.
+    dest = r || { 'edge-left': { x: 100, y: vh / 2 }, 'edge-right': { x: vw - 30, y: vh / 2 }, 'bottom-left': { x: vw / 4, y: vh - 20 }, 'bottom-right': { x: vw * 0.75, y: vh - 20 } }[key];
+  }
+  await step(mid, dest, 20);
+  await sleep(150);
+  const seen = await ev(`[...document.querySelectorAll('[data-ikm-drop]')].map(e => e.getAttribute('data-ikm-drop') + (e.classList.contains('ikm-dock-drop-active') ? '*' : ''))`);
+  await mouse('mouseReleased', dest.x, dest.y);
+  await mouse('mouseMoved', 5, 5);
+  return seen;
+}
+const zoneOf = (id) => ev(`(() => { const e = [...document.querySelectorAll('[data-ikm-dock-id="${id}"]')].find(x => x.parentElement && x.parentElement.hasAttribute('data-ikm-zone')); if (!e) return null; const k = e.parentElement.getAttribute('data-ikm-zone'); return k.startsWith('edge-left') ? 'edge-left' : k.startsWith('edge-right') ? 'edge-right' : k; })()`);
 async function clickSel(sel) {
   const c = await ev(`(() => { const e = [...document.querySelectorAll(${JSON.stringify(sel)})].find(x => x.getBoundingClientRect().width > 0); if (!e) return null; const r = e.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()`);
   if (!c) throw new Error('nothing visible matches ' + sel);
@@ -252,6 +279,66 @@ sc('real-three-right', 'Feedback, contents and a third utility on the right edge
   await T.check('contents chip double-clicked', ['feedback', 'toc', 'zt-er-a']);
 }, 1025);
 
+// Reader's choice (minimiseTarget 'user-choice'): drag a chip to another zone.
+// zt-uc-a starts bottom-left, zt-uc-b on the left edge; feedback and the
+// contents start on the right edge. Fixed utilities (zt-bl-a) stay put.
+sc('move-zones', "Drag a reader's-choice chip to every area in turn, opening and closing it after each move", async (T) => {
+  for (const id of ['zt-uc-a', 'zt-bl-a', 'zt-er-a']) await T.do(`minimise ${id}`, `__dt.minimise('${id}')`);
+  await T.check('docked');
+  const narrow = (await ev('innerWidth')) <= 1024;
+  const offered = narrow ? ['bottom-left', 'bottom-right'] : ['bottom-left', 'bottom-right', 'edge-left', 'edge-right'];
+  for (const key of narrow ? ['bottom-right', 'bottom-left'] : ['edge-right', 'edge-left', 'bottom-right', 'bottom-left']) {
+    const seen = await T.dragToZone('zt-uc-a', key);
+    T.expect(`targets offered while dragging to ${key}`, offered.every((k) => seen.some((x) => x.startsWith(k))) && seen.length === offered.length, seen.join(' '));
+    T.expect(`${key} lit while over it`, seen.includes(key + '*'), seen.join(' '));
+    await T.check(`moved to ${key}`);
+    T.expect(`zt-uc-a now in ${key}`, (await zoneOf('zt-uc-a')) === key, await zoneOf('zt-uc-a'));
+    await T.click('zt-uc-a'); await T.check(`opened from ${key}`);
+    await T.do('minimise zt-uc-a', "__dt.minimise('zt-uc-a')"); await T.check(`closed back into ${key}`);
+    T.expect(`zt-uc-a back in ${key}`, (await zoneOf('zt-uc-a')) === key, await zoneOf('zt-uc-a'));
+  }
+});
+sc('move-remembered', 'A moved chip keeps its new place after a reload; moving it home forgets the choice', async (T) => {
+  await T.do('minimise zt-uc-a', "__dt.minimise('zt-uc-a')");
+  await T.dragToZone('zt-uc-a', 'bottom-right'); await T.check('moved to bottom-right');
+  await T.reload(); await T.do('minimise zt-uc-a after reload', "__dt.minimise('zt-uc-a')"); await T.check('after reload');
+  T.expect('still bottom-right after reload', (await zoneOf('zt-uc-a')) === 'bottom-right', await zoneOf('zt-uc-a'));
+  await T.dragToZone('zt-uc-a', 'bottom-left'); await T.check('moved home');
+  T.expect('choice forgotten once home', !(await ev("(JSON.parse(localStorage.getItem('ikm-dock:place') || '{}').places || {})['zt-uc-a']")), 'still stored');
+});
+sc('move-cancel', 'Let go of a reader\'s-choice chip on the page, away from every area', async (T) => {
+  for (const id of ['zt-uc-a', 'zt-uc-b']) await T.do(`minimise ${id}`, `__dt.minimise('${id}')`);
+  const home = await zoneOf('zt-uc-b');
+  await T.dragToZone('zt-uc-b', 'page'); await T.check('let go on the page');
+  T.expect('sprang back home', (await zoneOf('zt-uc-b')) === home, await zoneOf('zt-uc-b'));
+  await T.pullOut('zt-uc-b', 20); await T.check('quick pull out and let go');
+  T.expect('still home', (await zoneOf('zt-uc-b')) === home, await zoneOf('zt-uc-b'));
+});
+sc('move-fixed', 'A fixed chip offers no areas and cannot leave its zone', async (T) => {
+  for (const id of ['zt-bl-a', 'zt-bl-b']) await T.do(`minimise ${id}`, `__dt.minimise('${id}')`);
+  const seen = await T.dragToZone('zt-bl-a', 'bottom-right');
+  T.expect('no targets for a fixed chip', seen.length === 0, seen.join(' '));
+  await T.check('dragged towards bottom-right');
+  T.expect('still bottom-left', (await zoneOf('zt-bl-a')) === 'bottom-left', await zoneOf('zt-bl-a'));
+});
+sc('move-then-narrow', 'Move a tab to an edge, narrow the window below 1024px, then widen it again', async (T) => {
+  await T.do('minimise zt-uc-a', "__dt.minimise('zt-uc-a')");
+  await T.dragToZone('zt-uc-a', 'edge-right'); await T.check('moved to the right edge');
+  await T.viewport(960, 470); await T.wait(400); await T.check('narrowed to 960px');
+  T.expect('folded into the bottom row', String(await zoneOf('zt-uc-a')).startsWith('bottom'), await zoneOf('zt-uc-a'));
+  await T.viewport(1920, 950); await T.wait(400); await T.check('widened again');
+  T.expect('back on the right edge', (await zoneOf('zt-uc-a')) === 'edge-right', await zoneOf('zt-uc-a'));
+}, 1025);
+sc('move-real-feedback', 'Move the real feedback tab to the bottom left, use it there, then put it back', async (T) => {
+  await T.check('feedback docked on load', ['feedback']);
+  await T.dragToZone('feedback', 'bottom-left'); await T.check('feedback moved to bottom-left', ['feedback']);
+  T.expect('feedback in bottom-left', (await zoneOf('feedback')) === 'bottom-left', await zoneOf('feedback'));
+  await T.click('feedback'); await T.wait(500); await T.check('form opened', ['feedback']);
+  await T.clickSel(FB_MIN); await T.check('form minimised into bottom-left', ['feedback']);
+  T.expect('feedback still bottom-left', (await zoneOf('feedback')) === 'bottom-left', await zoneOf('feedback'));
+  await T.dragToZone('feedback', 'edge-right'); await T.check('feedback put back on the right edge', ['feedback']);
+}, 1025);
+
 // Office-screen matrix (CSS pixels the page actually gets).
 const VIEWPORTS = {
   'office-100': [1920, 950],
@@ -275,6 +362,8 @@ async function runCase(s, vpName) {
     async clickIfThere(id) { if (await ev(`!!__dt.center('${id}')`)) await click(id); rec.steps.push(`click ${id} again`); },
     async has(id) { return !!(await ev(`__dt.center('${id}')`)); },
     async drag(id, onto, past) { await drag(id, onto, past); rec.steps.push(`drag ${id} -> ${onto}`); const ns = await settle(); if (ns) rec.failures.push({ at: `drag ${id}`, v: [ns] }); },
+    async dragToZone(id, key) { const seen = await dragToZone(id, key); rec.steps.push(`drag ${id} to ${key}`); const ns = await settle(); if (ns) rec.failures.push({ at: `drag ${id} to ${key}`, v: [ns] }); return seen; },
+    expect(label, ok, got) { rec.steps.push(`EXPECT ${label}: ${ok ? 'ok' : 'FAIL'}`); if (!ok) rec.failures.push({ at: label, v: ['EXPECT: ' + label + ' (got ' + got + ')'] }); },
     async pullOut(id, stepPx) { await pullOut(id, stepPx); rec.steps.push(`pull ${id} out (${stepPx}px steps)`); const ns = await settle(); if (ns) rec.failures.push({ at: `pull ${id}`, v: [ns] }); },
     async viewport(vw, vh, settleMs = 1) { await viewport(vw, vh); rec.steps.push(`viewport ${vw}x${vh}`); if (settleMs) await settle(); },
     async clickSel(sel) { await clickSel(sel); rec.steps.push(`click ${sel}`); const ns = await settle(); if (ns) rec.failures.push({ at: `click ${sel}`, v: [ns] }); },

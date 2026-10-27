@@ -26,10 +26,17 @@ export interface IDockDescriptor {
 
 export interface IDockableUtilitySettings {
   enabled: boolean;
+  /**
+   * Where it docks. 'user-choice' (contract v1.3): readers can drag its
+   * chip/tab to another zone and the browser remembers their pick; until
+   * they do, it docks at `defaultTarget`.
+   */
   minimiseTarget: MinimiseTarget;
-  /** Slot when target is 'bottom'. */
+  /** Starting zone when minimiseTarget is 'user-choice' (contract v1.3). Default 'bottom'. */
+  defaultTarget?: DockZone;
+  /** Slot when target (or defaultTarget) is 'bottom'. */
   bottomSide: 'left' | 'right';
-  /** Vertical cluster when target is an edge (contract v1.1). Default 'middle'. */
+  /** Vertical cluster when target (or defaultTarget) is an edge (contract v1.1). Default 'middle'. */
   edgeAlign?: 'top' | 'middle' | 'bottom';
   defaultState: 'expanded' | 'minimised';
   priority?: number;
