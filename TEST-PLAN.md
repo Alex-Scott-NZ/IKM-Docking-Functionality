@@ -15,8 +15,9 @@ mechanics**, so they stay valid when the animations change.
    configured priority order;
 5. nothing is left half-way: no faded, shrunken, offset or invisible chip,
    no leftover flight image;
-6. a restored utility has no chip left behind, and nothing is both docked
-   and open at once.
+6. an open utility keeps its chip/tab in its slot, marked open (darker, with
+   a white bar on the side facing the screen edge); a closed one is not
+   marked open (contract v1.4, 2026-10-28).
 
 The automated runner (`tools/dock-layout-tests/`) checks all six after every
 step and screenshots any failure. A manual tester checks the same things by
@@ -45,6 +46,8 @@ bottom clusters)**, each with three items docked.
 | B4 | Drag the last chip to the first position, and the first to the last | Neighbours slide aside; the dropped chip settles in its new slot |
 | B5 | After a reorder, open and close each utility | Each comes back to its reordered slot, not its default one |
 | B6 | Reload the page after a reorder | The order is kept |
+| B7 | Open each utility from its tab, then click the tab again | The tab stays in its slot, marked open, while the utility is showing; clicking it again minimises the utility and the mark goes |
+| B8 | Open the contents panel and the feedback form with both docked on the right edge, then expand the contents list | Neither panel covers a right-edge tab |
 
 ### Trying to break it
 | # | Do | Expect |
@@ -67,7 +70,7 @@ and the contents (both start on the right edge) are set up this way.
 
 | # | Do | Expect |
 |---|----|--------|
-| M1 | Start dragging a Reader's-choice tab | Every area it can go to lights up, its starting area marked "(default)": four areas on a wide screen, the two bottom ones at 1024px wide or less |
+| M1 | Start dragging a Reader's-choice tab | Every area it can go to lights up, its starting area marked "(default)": four areas on a wide screen, the two bottom ones at 1024px wide or less. Each area is the size and shape of what lands there: a 30px square-cornered strip along the bottom, a tab-wide strip flush with each edge |
 | M2 | Drag it over each area in turn | Only the area under the pointer goes solid |
 | M3 | Drop it on each area, then open and close it after each move | It lands in that area where it was dropped, the others close up and make room, and closing it later brings it back to the new area |
 | M4 | Reload, and visit another page | It is still where the reader put it |

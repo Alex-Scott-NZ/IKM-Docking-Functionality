@@ -178,3 +178,41 @@ views, forms and system pages — edge-to-edge content, no reading journey —
 the host withdraws entirely (same mechanism as the edit-mode withdrawal,
 re-evaluated on SPA navigation). Decided 2026-09-15 after the feedback edge
 tab covered the Site Pages library's columns.
+
+## v1.4 additions (2026-10-28): open utilities keep their tab
+
+Decided 2026-10-28: every utility behaves the same way when opened, like a
+window and its taskbar button. Before this, feedback's tab stayed in the dock
+while its form was open, but the contents tab left with the flight and came
+back on minimise, so tabs appeared and disappeared depending on which
+utility it was.
+
+```ts
+interface IDockDescriptor {
+  // ...
+  open?: boolean;   // the utility's UI is on screen
+}
+```
+
+- **A participant stays registered while its UI is open.** On restore it
+  calls `animateRestore` WITHOUT `chipHandOff`, shows its UI in `done`, and
+  reports `update(id, { open: true })`. On minimise it reports
+  `update(id, { open: false })` alongside `animateMinimise`.
+- **The host keeps the tab in its slot, marked open:** a shade darker with a
+  white bar on the side facing the screen edge, and `aria-expanded="true"`.
+  An update that changes only `open` restyles the tab in place (no
+  re-render, no entrance motion).
+- **Clicking an open utility's tab minimises it** (`onActivate` toggles).
+- Participants that never send `open` get no open/closed styling and no
+  `aria-expanded`, since the host cannot know. `chipHandOff` still works for
+  pre-1.4 participants that unregister on restore.
+- A participant may still unregister when its UI has no reason to be in the
+  dock at all, e.g. the contents tab while the inline table of contents is
+  on screen.
+
+**Drop areas** (Reader's choice, v1.3) are drawn the same size and shape as
+what lands there: a 30px strip along the bottom with square corners like the
+chips, and a tab-wide strip flush with each edge, rounded on the inner side
+like the tabs. The area that accepts the drop is wider than the outline
+(about 44px further in), so the thinner outline does not make the drop
+harder to hit.

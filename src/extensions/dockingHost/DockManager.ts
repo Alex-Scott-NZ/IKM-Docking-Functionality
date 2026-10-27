@@ -86,7 +86,10 @@ type DropKey = 'bottom-left' | 'bottom-right' | 'edge-left' | 'edge-right';
 interface IDropTarget {
   key: DropKey;
   el: HTMLElement;
+  /** What is drawn: the strip a chip or tab occupies there. */
   rect: IDockRect;
+  /** Where a drop counts: wider than the outline, so it stays easy to hit. */
+  hit: IDockRect;
 }
 
 /**
@@ -596,6 +599,13 @@ export class DockManager {
     const entry = this._registered.get(id);
     if (!entry) { return; }
     entry.descriptor = { ...entry.descriptor, ...patch, id };
+    const keys = Object.keys(patch);
+    if (entry.element && keys.length > 0 && keys.every((k) => k === 'open')) {
+      // Opening or closing only changes how the chip looks: no re-render, so
+      // it does not blink or replay its entrance in the reader's face.
+      this._applyOpenState(entry.element, entry.descriptor);
+      return;
+    }
     entry.element?.remove();
     entry.element = undefined;
     this._renderEntry(entry);
@@ -768,20 +778,38 @@ export class DockManager {
     if (!this._root) { return; }
     const W = window.innerWidth;
     const H = window.innerHeight;
-    const px = (v: string): number => parseFloat(v) || 0;
-    const leftX = this._rails.left ? px(this._rails.left.style.left) : 0;
-    const rightX = this._rails.right ? px(this._rails.right.style.right) : 20;
-    const railTop = this._rails.left ? this._rails.left.getBoundingClientRect().top : H * 0.1;
-    const strip = 52;
-    const edgeW = 64;
+    // Each area is drawn exactly where, and as thick as, a chip or tab sits
+    // once dropped there: the bottom row's 30px strip, and a tab-wide strip
+    // flush with each edge. Only the CATCH area is generous (`hit`), so the
+    // drop stays easy to make while the outline promises no more room than
+    // the tab will actually take.
+    const chipH = 30;
+    const sample = this._root.querySelector('.ikm-dock-tab') as HTMLElement | null;
+    const tabW = sample && sample.offsetWidth > 0 ? sample.offsetWidth : 26;
+    const reach = 44;
+    const bl = this._zones['bottom-left'];
+    const leftPad = bl ? parseFloat(window.getComputedStyle(bl).left) || 20 : 20;
+    const rightPad = this._scrollbarClearancePx();
+    const bottomTop = H - 2 - chipH;
     const rects: { [k in DropKey]?: IDockRect } = {
-      'bottom-left': { left: leftX + 8, top: H - strip - 4, width: W / 2 - leftX - 12, height: strip },
-      'bottom-right': { left: W / 2 + 4, top: H - strip - 4, width: W / 2 - rightX - 12, height: strip }
+      'bottom-left': { left: leftPad, top: bottomTop, width: W / 2 - leftPad - 6, height: chipH },
+      'bottom-right': { left: W / 2 + 6, top: bottomTop, width: W / 2 - 6 - rightPad, height: chipH }
+    };
+    const hits: { [k in DropKey]?: IDockRect } = {
+      'bottom-left': { left: 0, top: bottomTop - reach, width: W / 2, height: H - bottomTop + reach },
+      'bottom-right': { left: W / 2, top: bottomTop - reach, width: W / 2, height: H - bottomTop + reach }
     };
     if (!this._isNarrow()) {
-      const edgeH = Math.max(80, H - strip - 16 - railTop);
-      rects['edge-left'] = { left: leftX, top: railTop, width: edgeW, height: edgeH };
-      rects['edge-right'] = { left: W - rightX - edgeW, top: railTop, width: edgeW, height: edgeH };
+      const rail = (this._rails.left || this._rails.right) as HTMLElement | undefined;
+      const rr = rail ? rail.getBoundingClientRect() : undefined;
+      const top = rr && rr.height > 0 ? rr.top : H * 0.1;
+      const bottom = Math.min(rr && rr.height > 0 ? rr.bottom : H * 0.9, bottomTop - reach - 8);
+      const leftX = this._rails.left ? parseFloat(this._rails.left.style.left) || 0 : 0;
+      const rightX = W - rightPad - tabW;
+      rects['edge-left'] = { left: leftX, top, width: tabW, height: bottom - top };
+      rects['edge-right'] = { left: rightX, top, width: tabW, height: bottom - top };
+      hits['edge-left'] = { left: 0, top, width: leftX + tabW + reach, height: bottom - top };
+      hits['edge-right'] = { left: rightX - reach, top, width: W - rightX + reach, height: bottom - top };
     }
     const names: { [k in DropKey]: string } = {
       'bottom-left': 'Bottom left', 'bottom-right': 'Bottom right', 'edge-left': 'Left edge', 'edge-right': 'Right edge'
@@ -802,22 +830,24 @@ export class DockManager {
       label.textContent = k === home ? `${names[k]} (default)` : names[k];
       el.appendChild(label);
       (this._root as HTMLElement).appendChild(el);
-      this._drops.push({ key: k, el, rect: r });
+      this._drops.push({ key: k, el, rect: r, hit: hits[k] as IDockRect });
     });
     // Next frame, so they fade in rather than pop.
     window.requestAnimationFrame(() => this._drops.forEach((d) => d.el.classList.add('ikm-dock-drop-shown')));
   }
 
-  /** The drop target under (or within reach of) the pointer, lit up; the others dimmed. */
+  /** The drop target whose catch area holds the pointer, lit up; the others dimmed. */
   private _hitDropTarget(x: number, y: number): DropKey | undefined {
-    const reach = 32;
     let best: IDropTarget | undefined;
     let bestDist = Infinity;
     this._drops.forEach((d) => {
+      const h = d.hit;
+      if (x < h.left || x > h.left + h.width || y < h.top || y > h.top + h.height) { return; }
+      // Inside two catch areas (a corner): the nearer outline wins.
       const dx = Math.max(d.rect.left - x, 0, x - (d.rect.left + d.rect.width));
       const dy = Math.max(d.rect.top - y, 0, y - (d.rect.top + d.rect.height));
       const dist = Math.hypot(dx, dy);
-      if (dist <= reach && dist < bestDist) { best = d; bestDist = dist; }
+      if (dist < bestDist) { best = d; bestDist = dist; }
     });
     this._drops.forEach((d) => d.el.classList.toggle('ikm-dock-drop-active', d === best));
     return best ? best.key : undefined;
@@ -1158,6 +1188,7 @@ export class DockManager {
     }
     el.setAttribute('data-ikm-dock-id', entry.descriptor.id);
     el.setAttribute('aria-label', entry.descriptor.label);
+    this._applyOpenState(el, entry.descriptor);
 
     const icon = document.createElement('span');
     icon.className = 'ikm-dock-icon';
@@ -1206,6 +1237,20 @@ export class DockManager {
       window.setTimeout(release, 300); // rAF stalls in background tabs
     }
     entry.element = el;
+  }
+
+  /**
+   * Contract v1.4: an open utility keeps its chip, marked like a taskbar
+   * button whose window is showing. Only participants that report `open`
+   * get aria-expanded; for the rest the host cannot know, so it says nothing.
+   */
+  private _applyOpenState(el: HTMLElement, d: IDockDescriptor): void {
+    el.classList.toggle('ikm-dock-open', !!d.open);
+    if (d.open === undefined) {
+      el.removeAttribute('aria-expanded');
+    } else {
+      el.setAttribute('aria-expanded', d.open ? 'true' : 'false');
+    }
   }
 
   /** Capability rules — currently just: one back-to-top per page. */
@@ -1415,8 +1460,8 @@ export class DockManager {
    to, faint; the one under the pointer, strong. Under the chips (z - 1). */
 .ikm-dock-drop {
   position: fixed; z-index: ${DOCK_Z_INDEX - 1}; box-sizing: border-box; pointer-events: none;
-  display: flex; align-items: center; justify-content: center;
-  border: 2px dashed var(--ikm-dock-primary); border-radius: 8px;
+  display: flex; align-items: center; justify-content: center; overflow: hidden;
+  border: 2px dashed var(--ikm-dock-primary); border-radius: 0;
   background: color-mix(in srgb, var(--ikm-dock-primary) 12%, rgba(255, 255, 255, 0.35));
   opacity: 0; transition: opacity 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
 }
@@ -1424,18 +1469,20 @@ export class DockManager {
 .ikm-dock-drop-active {
   border-style: solid;
   background: color-mix(in srgb, var(--ikm-dock-primary) 28%, rgba(255, 255, 255, 0.35));
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ikm-dock-primary) 18%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ikm-dock-primary) 18%, transparent);
 }
 .ikm-dock-drop-label {
-  font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px; font-weight: 600;
+  font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px; font-weight: 600; line-height: 16px;
   color: var(--ikm-dock-primary); background: rgba(255, 255, 255, 0.92);
-  padding: 3px 8px; border-radius: 4px; white-space: nowrap;
+  padding: 1px 8px; border-radius: 2px; white-space: nowrap;
 }
-/* Edge labels sit low and on the inner side, clear of the tabs on the edge. */
+/* The same shapes as what lands there: square chips along the bottom, tabs
+   rounded only on the side away from the screen edge. Edge labels run down
+   the strip, low, clear of tabs already in the middle cluster. */
+.ikm-dock-drop-edge-left { border-radius: 0 6px 6px 0; }
+.ikm-dock-drop-edge-right { border-radius: 6px 0 0 6px; }
 .ikm-dock-drop-edge { align-items: flex-end; padding-bottom: 12px; }
-.ikm-dock-drop-edge-left { justify-content: flex-end; padding-right: 4px; }
-.ikm-dock-drop-edge-right { justify-content: flex-start; padding-left: 4px; }
-.ikm-dock-drop-edge .ikm-dock-drop-label { writing-mode: vertical-rl; padding: 8px 3px; }
+.ikm-dock-drop-edge .ikm-dock-drop-label { writing-mode: vertical-rl; padding: 8px 1px; }
 @media (prefers-reduced-motion: reduce) { .ikm-dock-drop { transition: none; } }
 .ikm-dock-land { animation: ikmDockLand 160ms ease-out; }
 @keyframes ikmDockLand { from { transform: scale(0.6); opacity: 0.4; } to { transform: scale(1); opacity: 1; } }
@@ -1459,6 +1506,13 @@ export class DockManager {
 .ikm-dock-tab { writing-mode: vertical-rl; padding: 12px 6px; letter-spacing: 0.06em; }
 .ikm-dock-zone-edge.ikm-dock-left .ikm-dock-tab { border-radius: 0 6px 6px 0; }
 .ikm-dock-zone-edge.ikm-dock-right .ikm-dock-tab { border-radius: 6px 0 0 6px; }
+/* Open (contract v1.4): the utility is on screen and its chip stays in the
+   dock, like a taskbar button: a shade darker, with a white bar on the side
+   that faces the screen edge (under a chip, outside a tab). */
+.ikm-dock-chip.ikm-dock-open, .ikm-dock-tab.ikm-dock-open { background: color-mix(in srgb, var(--ikm-dock-primary) 78%, #000); }
+.ikm-dock-chip.ikm-dock-open { box-shadow: inset 0 -3px 0 #fff; }
+.ikm-dock-zone-edge.ikm-dock-left .ikm-dock-tab.ikm-dock-open { box-shadow: inset 3px 0 0 #fff; }
+.ikm-dock-zone-edge.ikm-dock-right .ikm-dock-tab.ikm-dock-open { box-shadow: inset -3px 0 0 #fff; }
 .ikm-dock-chip:hover, .ikm-dock-tab:hover { transform: translateY(-1px); filter: brightness(1.1); }
 .ikm-dock-chip:focus-visible, .ikm-dock-tab:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .ikm-dock-icon { font-size: 12px; line-height: 1; }

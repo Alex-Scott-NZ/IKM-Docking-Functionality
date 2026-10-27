@@ -177,6 +177,12 @@ for (const zone of ['bottom-left', 'bottom-right', 'edge-left', 'edge-right-bott
     for (const id of z3(zone)) { await T.do(`minimise ${id}`, `__dt.minimise('${id}')`); await T.check(`after minimising ${id}`); }
     for (const id of z3(zone)) { await T.click(id); await T.check(`after restoring ${id}`); }
   });
+  sc(`taskbar-${zone}`, 'Open each from its tab (the tab stays, marked open), then close each by clicking its tab again', async (T) => {
+    for (const id of z3(zone)) await T.do(`minimise ${id}`, `__dt.minimise('${id}')`);
+    await T.check('docked');
+    for (const id of z3(zone)) { await T.click(id); await T.check(`opened ${id}: its tab stays, marked open`); }
+    for (const id of z3(zone)) { await T.click(id); await T.check(`closed ${id} by clicking its tab again`); }
+  });
   if (c) sc(`restore-middle-${zone}`, 'Dock three, restore the middle one, dock it again', async (T) => {
     for (const id of [a, b, c]) await T.do(`minimise ${id}`, `__dt.minimise('${id}')`);
     await T.check('three docked');
@@ -254,7 +260,7 @@ sc('real-toc', 'Dock the contents panel, scroll it away and back, restore it', a
   await T.clickSel(TOC_MIN); await T.check('contents docked', ['feedback', 'toc']);
   await T.scroll(0); await T.wait(600); await T.check('scrolled to top (inline contents showing)', ['feedback']);
   await T.scroll(1500); await T.wait(800); await T.check('scrolled back down', ['feedback', 'toc']);
-  await T.click('toc'); await T.wait(400); await T.check('contents restored', ['feedback']);
+  await T.click('toc'); await T.wait(400); await T.check('contents restored, its tab stays marked open', ['feedback', 'toc']);
   await T.clickSel(TOC_MIN); await T.check('contents docked again', ['feedback', 'toc']);
 }, 1025);
 sc('real-zoom-in-docked', 'Dock feedback and contents on a wide screen, then zoom in to 200% and back', async (T) => {

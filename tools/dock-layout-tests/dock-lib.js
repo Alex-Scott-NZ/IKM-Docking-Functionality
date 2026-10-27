@@ -78,8 +78,9 @@
   function descriptor(id) {
     if (descs[id]) return descs[id];
     descs[id] = {
-      id, label: id.replace(/^zt-/, '').toUpperCase(), icon: 'TestBeaker',
-      onActivate: () => restore(id)
+      id, label: id.replace(/^zt-/, '').toUpperCase(), icon: 'TestBeaker', open: false,
+      // Contract v1.4: the tab toggles, like a taskbar button.
+      onActivate: () => (panels[id] && panels[id].isConnected ? minimise(id) : restore(id))
     };
     return descs[id];
   }
@@ -87,7 +88,8 @@
   function show(id) { const p = panelFor(id); if (!p.isConnected) document.body.appendChild(p); return p; }
 
   // Minimise the way the real participants do: grab the rect, hide the UI at
-  // once, hand the rect + element to the host, register in the same turn.
+  // once, hand the rect + element to the host, register in the same turn
+  // (or, already registered because it was open, report it closed).
   function minimise(id) {
     const d = dock(); if (!d) throw new Error('no ikmDock');
     const p = show(id);
@@ -95,12 +97,15 @@
     const already = docked.has(id);
     p.remove();
     docked.add(id);
+    descriptor(id).open = false;
     if (d.animateMinimise) d.animateMinimise(id, from, undefined, p);
     if (!already) Promise.resolve().then(() => d.register(descriptor(id)));
+    else d.update(id, { open: false });
   }
 
-  // Restore: the host flies chip -> panel, then the panel shows. Hand-off
-  // participants (TOC-like) unregister; permanent ones (feedback-like) don't.
+  // Restore (contract v1.4): the host flies tab -> panel, then the panel
+  // shows; the participant stays registered and reports itself open, so its
+  // tab stays in the dock, marked open.
   function restore(id) {
     const d = dock();
     const p = panelFor(id);
@@ -108,9 +113,10 @@
     const to = { left: parseFloat(p.style.left), top: parseFloat(p.style.top), width: 260, height: 200 };
     const done = () => {
       document.body.appendChild(p);
-      if (!permanent.has(id)) { docked.delete(id); d.unregister(id); }
+      descriptor(id).open = true;
+      d.update(id, { open: true });
     };
-    if (d.animateRestore) d.animateRestore(id, to, done, { chipHandOff: !permanent.has(id) });
+    if (d.animateRestore) d.animateRestore(id, to, done);
     else done();
     return r;
   }
@@ -293,11 +299,29 @@
       if (!vis.length) v.push('UNREACHABLE: ' + id + ' is docked but has no visible chip (viewport ' + W + 'x' + H + ')');
     });
     Object.keys(descs).forEach((id) => {
-      if (!docked.has(id) && chipOf(id).length) v.push('LINGERING: ' + id + ' restored but its chip is still there');
+      if (!docked.has(id) && chipOf(id).length) v.push('LINGERING: ' + id + ' has a chip but was never docked');
     });
     Object.keys(panels).forEach((id) => {
       if (!docked.has(id) && !panels[id].isConnected) v.push('LOST-PANEL: ' + id + ' neither docked nor shown');
-      if (docked.has(id) && panels[id].isConnected && !permanent.has(id)) v.push('DOUBLE: ' + id + ' docked and shown at once');
+      // 9. Contract v1.4: an open utility keeps its tab, marked open; a closed one is not marked.
+      const shown = panels[id].isConnected;
+      chipOf(id).forEach((e) => {
+        const marked = e.classList.contains('ikm-dock-open') && e.getAttribute('aria-expanded') === 'true';
+        if (shown && !marked) v.push('OPEN-STATE: ' + id + ' is open but its tab is not marked open');
+        if (!shown && e.classList.contains('ikm-dock-open')) v.push('OPEN-STATE: ' + id + ' is closed but its tab is still marked open');
+      });
+    });
+    // The real participants, by what is on screen: a tab is marked open
+    // exactly while its utility's UI is showing.
+    const onScreen = (sel) => [...document.querySelectorAll(sel)].some((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== 'hidden'; });
+    [['feedback', '.ikm-feedback-form, [aria-label="Feedback Submission Form"]'], ['toc', '[class*="pinnedFloat"]']].forEach(([id, sel]) => {
+      chipOf(id).forEach((e) => {
+        if (!e.hasAttribute('aria-expanded')) return; // participant predates contract v1.4
+        const open = e.getAttribute('aria-expanded') === 'true';
+        const shown = onScreen(sel);
+        if (shown && !open) v.push('OPEN-STATE: ' + id + ' is showing but its tab is not marked open');
+        if (!shown && open) v.push('OPEN-STATE: ' + id + ' is closed but its tab is still marked open');
+      });
     });
     return v.concat(flightMisses());
   }

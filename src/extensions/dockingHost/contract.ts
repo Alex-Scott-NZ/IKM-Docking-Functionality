@@ -20,7 +20,17 @@ export interface IDockDescriptor {
   priority?: number;
   /** Capabilities, e.g. ['back-to-top'] — the host suppresses its built-in equivalent while registered. */
   provides?: string[];
-  /** User clicked the chip/tab — participant restores itself (and should then unregister). */
+  /**
+   * Contract v1.4: the utility's UI is open on screen. A participant stays
+   * registered while open and reports it here (`update(id, { open })`); the
+   * host keeps the chip/tab in its slot, marked as open, like a taskbar
+   * button. Omitted = the host shows no open/closed state.
+   */
+  open?: boolean;
+  /**
+   * User clicked the chip/tab. Closed: open the utility. Open (v1.4): minimise
+   * it again. Pre-1.4 participants restore and unregister instead.
+   */
   onActivate: () => void;
 }
 
@@ -78,8 +88,8 @@ export interface IIkmDock {
   animateMinimise?(id: string, from: IDockRect, done?: () => void, source?: Element): void;
   /**
    * `chipHandOff`: the chip departs WITH the flight (hidden at launch) —
-   * for utilities that unregister on restore (TOC). Omit it for utilities
-   * whose chip is permanent while docked (feedback): theirs stays put.
+   * for pre-1.4 utilities that unregister on restore. A v1.4 participant
+   * stays registered while open (see `open`) and omits it.
    */
   animateRestore?(id: string, to: IDockRect, done?: () => void, options?: { chipHandOff?: boolean }): void;
 }
