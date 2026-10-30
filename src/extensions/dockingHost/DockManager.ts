@@ -29,6 +29,14 @@ const NARROW_PX = 1024;
 const PLACE_KEY = 'ikm-dock:place';
 /** How far a dragged chip gives when pulled across its zone, out onto the page. */
 const DRAG_OFF_AXIS_PX = 16;
+/** Space between neighbouring edge tabs. */
+const EDGE_GAP_PX = 8;
+/**
+ * Shortest an edge tab may get (its label truncates) when an edge is
+ * crowded. Once even this does not fit, the least important tabs fold into
+ * the bottom row instead (see _computeOverflow).
+ */
+const EDGE_TAB_MIN_PX = 40;
 /**
  * One motion duration for every participant (contract v1.2 host-owned
  * motion). 240ms with a decelerate curve: the old 180ms ease-in packed most
@@ -78,6 +86,12 @@ interface IPlacement {
   target: DockZone;
   bottomSide: 'left' | 'right';
   edgeAlign: 'top' | 'middle' | 'bottom';
+  /**
+   * A reader's own spot on an edge: where the tab's centre sits, as a
+   * fraction of the edge's length (0 top, 1 bottom), so it scales with the
+   * window. Unset = the admin's cluster (edgeAlign).
+   */
+  edgePos?: number;
 }
 
 /** The areas a reader can drop a movable chip on. */
@@ -125,8 +139,14 @@ export class DockManager {
   private _bottomHost: HTMLElement | undefined;
 
   // One rail per screen edge, holding that edge's three clusters (top,
-  // middle, bottom) in a single column so they can never overlap.
+  // middle, bottom). Its tabs are positioned by _placeTabs, one pass per
+  // edge, so they can never overlap whoever put them there.
   private _rails: { [side: string]: HTMLElement } = {};
+
+  // Edge utilities folded into the bottom row because their edge is full.
+  private _overflow: Set<string> = new Set();
+  private _layingOut = false;
+  private _railHeights: { [side: string]: number } = {};
 
   // Drop targets on screen while a movable chip is being dragged.
   private _drops: IDropTarget[] = [];
@@ -235,6 +255,7 @@ export class DockManager {
       if (el && el.parentElement !== this._zoneFor(id)) { this._update(id, {}); }
     });
     this._updateBottomRowOffset();
+    this._layoutRails();
   }
 
   /** Re-evaluate visibility (edit mode toggles, SPA navigation). */
@@ -391,6 +412,20 @@ export class DockManager {
       if (isColumn) { return { left: lr.left, top: lr.bottom + gap, width: w, height: h }; }
       if (reversed) { return { left: lr.left - gap - w, top: lr.top, width: w, height: h }; }
       return { left: lr.right + gap, top: lr.top, width: w, height: h };
+    }
+    const rail = zone.parentElement;
+    if (zone.className.indexOf('ikm-dock-zone-edge') !== -1 && rail) {
+      // Empty edge cluster (it has no box of its own): aim at the spot the
+      // layout pass would give a lone tab, tab-sized.
+      const rr = rail.getBoundingClientRect();
+      const p = this._placement(id);
+      const at = typeof p.edgePos === 'number' ? p.edgePos
+        : p.edgeAlign === 'top' ? 0.05 : p.edgeAlign === 'bottom' ? 0.95 : 0.25;
+      const w = 26;
+      const h = 100;
+      const left = zone.className.indexOf('ikm-dock-right') !== -1 ? rr.right - w : rr.left;
+      const top = Math.max(rr.top, Math.min(rr.bottom - h, rr.top + at * rr.height - h / 2));
+      return { left, top, width: w, height: h };
     }
     const zr = zone.getBoundingClientRect();
     if (zr.left !== 0 || zr.top !== 0 || zr.width !== 0 || zr.height !== 0) {
@@ -588,6 +623,7 @@ export class DockManager {
     const remove = (): void => {
       entry.element?.remove();
       this._registered.delete(id);
+      this._layoutRails();
     };
     if (inPlace) { remove(); } else { this._slideNeighbours(remove); }
     this._applyArbitration();
@@ -674,17 +710,15 @@ export class DockManager {
     if (this._bottomHost) { this._bottomHost.classList.add('ikm-dock-bottom-host'); }
     this._zones['bottom-left'] = mk('ikm-dock-zone-bottom ikm-dock-left', bottomParent);
     this._zones['bottom-right'] = mk('ikm-dock-zone-bottom ikm-dock-right', bottomParent);
-    // Each edge is one rail: top cluster, flexible gap, middle cluster,
-    // flexible gap, bottom cluster. The gaps give way first when space runs
-    // short, then the tabs shrink (labels truncate), so the clusters can't
-    // overlap the way independently positioned ones did on short windows.
+    // Each edge is one rail holding its top, middle and bottom clusters.
+    // The clusters only group tabs; _placeTabs positions every tab on the
+    // edge in one pass, together with tabs a reader put at their own spot,
+    // so nothing on an edge can overlap.
     ['left', 'right'].forEach((side) => {
       const rail = mk(`ikm-dock-rail ikm-dock-${side}`, root);
       this._rails[side] = rail;
       this._zones[`edge-${side}:top`] = mk(`ikm-dock-zone-edge ikm-dock-${side} ikm-dock-edge-top`, rail);
-      mk('ikm-dock-rail-gap ikm-dock-rail-gap-upper', rail);
       this._zones[`edge-${side}`] = mk(`ikm-dock-zone-edge ikm-dock-${side}`, rail);
-      mk('ikm-dock-rail-gap ikm-dock-rail-gap-lower', rail);
       this._zones[`edge-${side}:bottom`] = mk(`ikm-dock-zone-edge ikm-dock-${side} ikm-dock-edge-bottom`, rail);
     });
     // Zone keys on the elements — the reader's drag-reorder store is keyed
@@ -696,10 +730,162 @@ export class DockManager {
 
   private _zoneFor(id: string): HTMLElement {
     const p = this._placement(id);
-    if (p.target !== 'bottom' && !this._isNarrow()) {
-      return this._edgeZone(p.target, p.edgeAlign);
+    if (p.target !== 'bottom' && !this._isNarrow() && !this._overflow.has(id)) {
+      // A reader's own spot is positioned by _placeTabs; the middle
+      // cluster just holds it.
+      return this._edgeZone(p.target, typeof p.edgePos === 'number' ? 'middle' : p.edgeAlign);
     }
     return this._zones[p.bottomSide === 'left' ? 'bottom-left' : 'bottom-right'];
+  }
+
+  // ---------------------------------------------------- edge tab layout
+
+  /**
+   * Position every tab on both edges. Runs whenever an edge's tabs or size
+   * change. First decides which tabs still fit on their edge (the rest fold
+   * into the bottom row), then places what is left.
+   */
+  private _layoutRails(): void {
+    if (this._layingOut || !this._root) { return; }
+    this._layingOut = true;
+    try {
+      if (this._computeOverflow()) { this._rezone(); }
+      this._placeTabs('left');
+      this._placeTabs('right');
+    } finally {
+      this._layingOut = false;
+    }
+  }
+
+  /**
+   * An edge holds as many tabs as fit at their shortest. When more are
+   * docked there, the least important (highest priority number) fold into
+   * the bottom row, so every utility stays reachable; they return when the
+   * window grows or the edge empties. Returns whether anything moved.
+   */
+  private _computeOverflow(): boolean {
+    const next = new Set<string>();
+    if (!this._isNarrow()) {
+      ['left', 'right'].forEach((side) => {
+        const rail = this._rails[side];
+        const railH = rail ? rail.clientHeight : 0;
+        if (railH <= 0) { return; }
+        const capacity = Math.max(1, Math.floor((railH + EDGE_GAP_PX) / (EDGE_TAB_MIN_PX + EDGE_GAP_PX)));
+        const ids: string[] = [];
+        this._registered.forEach((_entry, id) => {
+          if (id !== 'back-to-top' && this._placement(id).target === `edge-${side}`) { ids.push(id); }
+        });
+        ids
+          .sort((a, b) => this._priorityOfId(a) - this._priorityOfId(b) || (a < b ? -1 : 1))
+          .slice(capacity)
+          .forEach((id) => next.add(id));
+      });
+    }
+    const changed = next.size !== this._overflow.size || Array.from(next).some((id) => !this._overflow.has(id));
+    if (changed) {
+      this._overflow = next;
+      if (next.size) { this._log(`edge full, folded into the bottom row: ${Array.from(next).join(',')}`); }
+    }
+    return changed;
+  }
+
+  /**
+   * Lay out one edge's tabs. Each tab has a spot it wants: a reader's own
+   * spot (edgePos), or its admin cluster stacked from the top, around the
+   * upper quarter (middle) or from the bottom. Tabs that would overlap are
+   * pushed apart evenly from where they want to be: neighbours are merged
+   * into a block centred on the average of their wishes, kept on the edge
+   * (pool adjacent violators, so nobody moves further than necessary). On a
+   * crowded edge the tabs first shrink towards EDGE_TAB_MIN_PX.
+   */
+  private _placeTabs(side: string): void {
+    const rail = this._rails[side];
+    if (!rail) { return; }
+    const railH = rail.clientHeight;
+    this._railHeights[side] = railH;
+    const clusters = ['top', 'middle', 'bottom'].map((align) =>
+      Array.prototype.slice.call(this._edgeZone(`edge-${side}` as 'edge-left' | 'edge-right', align as 'top' | 'middle' | 'bottom').children) as HTMLElement[]);
+    const tabs = clusters[0].concat(clusters[1], clusters[2]);
+    if (tabs.length === 0 || railH <= 0) { return; }
+
+    // Natural heights: clear any squeeze first, then read them all at once.
+    tabs.forEach((el) => { el.style.height = ''; });
+    const natural = new Map<HTMLElement, number>();
+    tabs.forEach((el) => natural.set(el, el.offsetHeight));
+    const heights = new Map<HTMLElement, number>(natural);
+    const gaps = EDGE_GAP_PX * (tabs.length - 1);
+    const total = tabs.reduce((s, el) => s + (natural.get(el) || 0), 0);
+    if (total + gaps > railH) {
+      const spare = tabs.reduce((s, el) => s + Math.max(0, (natural.get(el) || 0) - EDGE_TAB_MIN_PX), 0);
+      const factor = spare > 0 ? Math.max(0, Math.min(1, (railH - gaps - tabs.length * EDGE_TAB_MIN_PX) / spare)) : 0;
+      tabs.forEach((el) => {
+        const h = natural.get(el) || 0;
+        heights.set(el, h > EDGE_TAB_MIN_PX ? EDGE_TAB_MIN_PX + (h - EDGE_TAB_MIN_PX) * factor : h);
+      });
+    }
+
+    // Where each tab wants to be (its top edge).
+    const ownSpot = (el: HTMLElement): number | undefined => {
+      const id = el.getAttribute('data-ikm-dock-id') || '';
+      const p = this._placement(id);
+      return typeof p.edgePos === 'number' ? p.edgePos : undefined;
+    };
+    const stackH = (els: HTMLElement[]): number =>
+      els.reduce((s, el) => s + (heights.get(el) || 0), 0) + EDGE_GAP_PX * Math.max(0, els.length - 1);
+    const fixed = clusters.map((c) => c.filter((el) => ownSpot(el) === undefined));
+    const topH = stackH(fixed[0]);
+    const midH = stackH(fixed[1]);
+    const botH = stackH(fixed[2]);
+    // The middle cluster sits about a quarter of the way down the free space,
+    // as it always has.
+    const starts = [0, topH + Math.max(0, railH - topH - midH - botH) * 0.25, railH - botH];
+    const wants: { el: HTMLElement; want: number; h: number; seq: number }[] = [];
+    fixed.forEach((cluster, ci) => {
+      let y = starts[ci];
+      cluster.forEach((el) => {
+        const h = heights.get(el) || 0;
+        wants.push({ el, want: y, h, seq: wants.length });
+        y += h + EDGE_GAP_PX;
+      });
+    });
+    tabs.forEach((el) => {
+      const f = ownSpot(el);
+      if (f === undefined) { return; }
+      const h = heights.get(el) || 0;
+      wants.push({ el, want: f * railH - h / 2, h, seq: wants.length });
+    });
+    wants.sort((a, b) => a.want - b.want || a.seq - b.seq);
+
+    // Merge overlapping neighbours into blocks centred on their average wish.
+    const clamp = (top: number, h: number): number => Math.max(0, Math.min(railH - h, top));
+    interface IBlock { items: typeof wants; h: number; sum: number; top: number }
+    const blocks: IBlock[] = [];
+    wants.forEach((w) => {
+      let cur: IBlock = { items: [w], h: w.h, sum: w.want, top: clamp(w.want, w.h) };
+      while (blocks.length > 0) {
+        const prev = blocks[blocks.length - 1];
+        if (prev.top + prev.h + EDGE_GAP_PX <= cur.top) { break; }
+        blocks.pop();
+        // Each member's wish, less its offset within the merged block.
+        const shift = prev.h + EDGE_GAP_PX;
+        const n = prev.items.length + cur.items.length;
+        const sum = prev.sum + cur.sum - shift * cur.items.length;
+        const h = prev.h + EDGE_GAP_PX + cur.h;
+        cur = { items: prev.items.concat(cur.items), h, sum, top: clamp(sum / n, h) };
+      }
+      blocks.push(cur);
+    });
+
+    blocks.forEach((b) => {
+      let y = b.top;
+      b.items.forEach((w) => {
+        const top = `${Math.round(y)}px`;
+        if (w.el.style.top !== top) { w.el.style.top = top; }
+        const squeezed = w.h < (natural.get(w.el) || 0) - 0.5;
+        w.el.style.height = squeezed ? `${Math.floor(w.h)}px` : '';
+        y += w.h + EDGE_GAP_PX;
+      });
+    });
   }
 
   // ------------------------------------------- reader's choice of zone
@@ -859,23 +1045,29 @@ export class DockManager {
   }
 
   /**
-   * A movable chip was dropped on another zone: remember the reader's pick,
-   * re-render the chip there at the drop point's place in the order, and
-   * let it glide from where it was let go while the neighbours on both
-   * sides close up and make room.
+   * A movable chip was dropped on a zone (or anywhere along an edge,
+   * including its own): remember the reader's pick, re-render the chip
+   * there (on an edge at the height it was let go, in the bottom row at the
+   * drop point's place in the order), and let it glide from where it was
+   * let go while the neighbours close up and make room.
    */
   private _moveTo(id: string, key: DropKey, x: number, y: number, from: DOMRect): void {
     const current = this._placement(id);
+    const rail = this._rails[key === 'edge-left' ? 'left' : 'right'];
+    const rr = rail ? rail.getBoundingClientRect() : undefined;
     const place: IPlacement = key.indexOf('bottom') === 0
       ? { target: 'bottom', bottomSide: key === 'bottom-left' ? 'left' : 'right', edgeAlign: current.edgeAlign }
       : {
         target: key as 'edge-left' | 'edge-right',
         bottomSide: current.bottomSide,
-        // The admin's cluster when it goes back to its own edge, else the middle.
-        edgeAlign: this._defaultPlacement(id).target === key ? this._defaultPlacement(id).edgeAlign : 'middle'
+        edgeAlign: current.edgeAlign,
+        // Its centre where it was let go, along the edge.
+        edgePos: rr && rr.height > 0 ? Math.max(0, Math.min(1, (y - rr.top) / rr.height)) : 0.25
       };
     const def = this._defaultPlacement(id);
-    const isDefault = this._placementKey(def) === key && def.edgeAlign === place.edgeAlign;
+    // Back home in the bottom row = forget the pick. An edge spot is always
+    // the reader's own, so it is kept.
+    const isDefault = key.indexOf('bottom') === 0 && this._placementKey(def) === key;
     this._savePlace(id, isDefault ? undefined : place); // back home = forget the pick
     const entry = this._registered.get(id);
     if (!entry) { return; }
@@ -885,8 +1077,9 @@ export class DockManager {
       const zone = el && el.parentElement;
       if (!el || !zone) { return; }
       el.classList.remove('ikm-dock-enter');
-      const isColumn = zone.className.indexOf('ikm-dock-zone-edge') !== -1;
-      this._reorderToPointer(el, zone, isColumn ? y : x, false);
+      // On an edge _placeTabs has already put it at the drop point.
+      if (zone.className.indexOf('ikm-dock-zone-edge') !== -1) { return; }
+      this._reorderToPointer(el, zone, x, false);
       this._persistZoneOrder(zone);
     }, () => entry.element);
     this._updateBottomRowOffset();
@@ -1037,7 +1230,9 @@ export class DockManager {
       const settleTy = ty;
       tx = 0;
       ty = 0;
-      if (movable && dropKey && dropKey !== homeKey) {
+      // On an edge a reader's-choice tab goes where it is let go, even on
+      // its own edge; in the bottom row its own zone means a reorder.
+      if (movable && dropKey && (dropKey !== homeKey || dropKey.indexOf('edge') === 0)) {
         this._moveTo(id, dropKey, lastX, lastY, heldAt);
         return;
       }
@@ -1075,7 +1270,9 @@ export class DockManager {
       const isColumn = zone.className.indexOf('ikm-dock-zone-edge') !== -1;
       overKey = movable ? this._hitDropTarget(e.clientX, e.clientY) : homeKey;
       // Reorder only while over its own zone; over another it is moving.
-      if (overKey === homeKey) {
+      // A reader's-choice tab on an edge is never reordered: it is placed
+      // where it is let go.
+      if (overKey === homeKey && !(movable && isColumn)) {
         this._reorderToPointer(el, zone, isColumn ? e.clientY : e.clientX, true);
       }
       followPointer(e, isColumn);
@@ -1084,6 +1281,11 @@ export class DockManager {
       if (e.pointerId === pointerId) { end(); }
     };
     const onBlur = (): void => end();
+    // Chrome can start a native drag of whatever lies under the held tab:
+    // on the left edge that is SharePoint's nav link, and the link's
+    // dragstart cancels our pointer stream (pointercancel), dropping the tab
+    // a few pixels from where it was picked up (found 2026-10-30).
+    const noNativeDrag = (e: DragEvent): void => e.preventDefault();
 
     el.addEventListener('pointerdown', (e: PointerEvent) => {
       if (e.button !== 0) { return; }
@@ -1104,11 +1306,13 @@ export class DockManager {
       window.addEventListener('pointerup', onUp, true);
       window.addEventListener('pointercancel', onUp, true);
       window.addEventListener('blur', onBlur);
+      window.addEventListener('dragstart', noNativeDrag, true);
       detach = () => {
         window.removeEventListener('pointermove', onMove, true);
         window.removeEventListener('pointerup', onUp, true);
         window.removeEventListener('pointercancel', onUp, true);
         window.removeEventListener('blur', onBlur);
+        window.removeEventListener('dragstart', noNativeDrag, true);
       };
     });
   }
@@ -1155,6 +1359,7 @@ export class DockManager {
     const others = movable.concat(pinned);
     const before = others.map((o) => ({ o, r: o.getBoundingClientRect() }));
     desired.forEach((n) => zone.appendChild(n));
+    if (isColumn) { this._layoutRails(); }
     if (!animateOthers) { return; }
     before.forEach(({ o, r }) => {
       const a = o.getBoundingClientRect();
@@ -1225,6 +1430,11 @@ export class DockManager {
     zone.insertBefore(el, next || null);
     // Reader's saved drag-order for this page wins over priority placement.
     this._applyReaderOrder(zone);
+    entry.element = el;
+    this._layoutRails();
+    // The layout found this edge full and re-rendered the chip in the
+    // bottom row: that render owns the entrance.
+    if (entry.element !== el) { return; }
     // Entrance motion: start shrunken/low, release next frame (the shared
     // transition rule animates it in; reduced-motion kills transitions).
     // Not for a chip whose minimise flight is still coming: it stays hidden
@@ -1236,7 +1446,6 @@ export class DockManager {
       window.requestAnimationFrame(() => window.requestAnimationFrame(release));
       window.setTimeout(release, 300); // rAF stalls in background tabs
     }
-    entry.element = el;
   }
 
   /**
@@ -1386,6 +1595,9 @@ export class DockManager {
     const ab = appBar ? appBar.getBoundingClientRect() : undefined;
     const leftPx = `${ab && ab.width > 0 && ab.left < 80 ? Math.round(ab.right) : 0}px`;
     if (left.style.left !== leftPx) { left.style.left = leftPx; }
+    if (left.clientHeight !== this._railHeights.left || right.clientHeight !== this._railHeights.right) {
+      this._layoutRails();
+    }
   }
 
   private _setBackToTopScrolled(past: boolean): void {
@@ -1440,15 +1652,16 @@ export class DockManager {
 .ikm-dock-zone-bottom { position: fixed; bottom: 2px; z-index: ${DOCK_Z_INDEX}; display: flex; gap: 8px; align-items: center; }
 .ikm-dock-zone-bottom.ikm-dock-left { left: 20px; }
 .ikm-dock-zone-bottom.ikm-dock-right { right: 20px; flex-direction: row-reverse; }
-.ikm-dock-rail { position: fixed; top: 10%; bottom: 10%; z-index: ${DOCK_Z_INDEX}; display: flex; flex-direction: column; pointer-events: none; }
-.ikm-dock-rail.ikm-dock-left { left: 0; align-items: flex-start; }
-.ikm-dock-rail.ikm-dock-right { right: 0; align-items: flex-end; }
-.ikm-dock-rail-gap { flex: 1 1 0; min-height: 0; }
-/* The middle cluster sits about a quarter of the way down, as it always has. */
-.ikm-dock-rail-gap-lower { flex-grow: 3; }
-.ikm-dock-zone-edge { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 0 1 auto; pointer-events: auto; }
-.ikm-dock-zone-edge:empty { display: none; }
-.ikm-dock-zone-edge .ikm-dock-tab { flex: 0 1 auto; min-height: 40px; overflow: hidden; }
+.ikm-dock-rail { position: fixed; top: 10%; bottom: 10%; width: 0; z-index: ${DOCK_Z_INDEX}; pointer-events: none; }
+.ikm-dock-rail.ikm-dock-left { left: 0; }
+.ikm-dock-rail.ikm-dock-right { right: 0; }
+/* The clusters only group tabs (and keep their zone keys); every tab on an
+   edge is positioned by the host's layout pass, from the rail's top. Their
+   flex-direction stays: code reads it to tell an edge column from a row. */
+.ikm-dock-zone-edge { display: contents; flex-direction: column; pointer-events: auto; }
+.ikm-dock-zone-edge .ikm-dock-tab { position: absolute; top: 0; box-sizing: border-box; min-height: ${EDGE_TAB_MIN_PX}px; overflow: hidden; }
+.ikm-dock-zone-edge.ikm-dock-left .ikm-dock-tab { left: 0; }
+.ikm-dock-zone-edge.ikm-dock-right .ikm-dock-tab { right: 0; }
 .ikm-dock-zone-edge .ikm-dock-label { min-height: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ikm-dock-motion-proxy { position: fixed; z-index: ${DOCK_Z_INDEX + 1}; pointer-events: none; border-radius: 6px; opacity: 0.55; transform-origin: center; will-change: transform, opacity; }
 .ikm-dock-preflight { visibility: hidden !important; }

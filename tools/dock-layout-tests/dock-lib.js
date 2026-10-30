@@ -193,8 +193,17 @@
     } catch (e) { return {}; }
   }
 
+  // Utilities a reader has put at their own spot on an edge (edgePos).
+  function ownSpots() {
+    try {
+      const places = (JSON.parse(localStorage.getItem('ikm-dock:place') || '{}').places) || {};
+      return Object.keys(places).filter((id) => typeof places[id].edgePos === 'number');
+    } catch (e) { return []; }
+  }
+
   function check(expectDocked) {
     const v = [];
+    const spots = ownSpots();
     const roots = document.querySelectorAll('#ikm-dock-host');
     if (roots.length !== 1) v.push('HOST-COUNT: ' + roots.length + ' docking hosts on the page (expected 1)');
     const W = innerWidth, H = innerHeight;
@@ -236,7 +245,10 @@
       for (let i = 1; i < visual.length; i++) {
         const a = visual[i - 1].r, b = visual[i].r;
         const gap = isColumn ? b.top - a.bottom : b.left - a.right;
-        if (Math.abs(gap - GAP) > TOL) v.push('SLOT-GAP: ' + key + ' ' + visual[i - 1].id + '->' + visual[i].id + ' gap ' + gap.toFixed(1) + 'px (expected ' + GAP + ')');
+        // A tab at a reader's own spot sits where it was put, so its gaps
+        // vary: the whole-edge check below holds it to "never closer than one gap".
+        const free = isColumn && (spots.includes(visual[i - 1].id) || spots.includes(visual[i].id));
+        if (!free && Math.abs(gap - GAP) > TOL) v.push('SLOT-GAP: ' + key + ' ' + visual[i - 1].id + '->' + visual[i].id + ' gap ' + gap.toFixed(1) + 'px (expected ' + GAP + ')');
         if (isColumn) {
           const side = key.indexOf('right') !== -1 ? 'right' : 'left';
           if (Math.abs(a[side] - b[side]) > TOL) v.push('SLOT-ALIGN: ' + key + ' ' + visual[i].id + ' ' + side + ' edge ' + b[side].toFixed(1) + ' vs ' + a[side].toFixed(1));
@@ -270,6 +282,21 @@
         allChips.push(L);
       }
     }
+    // 5b. Each edge as a whole: tabs at least one gap apart, inside the edge,
+    // and flush with the screen edge (right: just clear of the scrollbar).
+    document.querySelectorAll('.ikm-dock-rail').forEach((rail) => {
+      const right = rail.classList.contains('ikm-dock-right');
+      const rr = rail.getBoundingClientRect();
+      const tabs = allChips.filter((L) => rail.contains(L.k)).sort((a, b) => a.r.top - b.r.top);
+      for (let i = 1; i < tabs.length; i++) {
+        const gap = tabs[i].r.top - tabs[i - 1].r.bottom;
+        if (gap < GAP - TOL) v.push('EDGE-GAP: ' + tabs[i - 1].id + '->' + tabs[i].id + ' only ' + gap.toFixed(1) + 'px apart (at least ' + GAP + ')');
+      }
+      tabs.forEach((L) => {
+        if (L.r.top < rr.top - TOL || L.r.bottom > rr.bottom + TOL) v.push('EDGE-BOUNDS: ' + L.id + ' runs past its edge (' + Math.round(L.r.top) + '-' + Math.round(L.r.bottom) + ' vs ' + Math.round(rr.top) + '-' + Math.round(rr.bottom) + ')');
+        if (right && Math.abs(L.r.right - (W - clearance)) > TOL) v.push('ZONE-ANCHOR: ' + L.id + ' right edge at ' + L.r.right.toFixed(1) + ', expected ' + (W - clearance).toFixed(1));
+      });
+    });
     // 6. No two visible chips overlap (across zones and hosts).
     for (let i = 0; i < allChips.length; i++) for (let j = i + 1; j < allChips.length; j++) {
       const a = allChips[i].r, b = allChips[j].r;

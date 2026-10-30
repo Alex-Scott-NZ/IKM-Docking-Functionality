@@ -109,7 +109,7 @@ async function pullOut(id, stepPx) {
 // edge-left, edge-right) or, with key 'page', to the middle of the page, and
 // let go. Returns what was on screen just before letting go: the drop
 // targets offered and which one was lit.
-async function dragToZone(id, key) {
+async function dragToZone(id, key, point) {
   const a = await center(id);
   await mouse('mouseMoved', a.x, a.y);
   await mouse('mousePressed', a.x, a.y, 1);
@@ -119,7 +119,9 @@ async function dragToZone(id, key) {
   const step = async (from, to, n) => { for (let i = 1; i <= n; i++) { await mouse('mouseMoved', from.x + (to.x - from.x) * i / n, from.y + (to.y - from.y) * i / n, 1); await sleep(16); } };
   await step(a, mid, 20);
   let dest = mid;
-  if (key !== 'page') {
+  if (point) {
+    dest = point;
+  } else if (key !== 'page') {
     const r = await ev(`(() => { const e = document.querySelector('[data-ikm-drop="${key}"]'); if (!e) return null; const b = e.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; })()`);
     // Not offered (e.g. an edge on a narrow screen): aim where it would be.
     dest = r || { 'edge-left': { x: 100, y: vh / 2 }, 'edge-right': { x: vw - 30, y: vh / 2 }, 'bottom-left': { x: vw / 4, y: vh - 20 }, 'bottom-right': { x: vw * 0.75, y: vh - 20 } }[key];
@@ -131,6 +133,10 @@ async function dragToZone(id, key) {
   await mouse('mouseMoved', 5, 5);
   return seen;
 }
+// Drag chip `id` to an exact point (for a reader's own spot along an edge).
+const dragTo = (id, point) => dragToZone(id, 'point', point);
+const railBox = (side) => ev(`(() => { const r = document.querySelector('.ikm-dock-rail.ikm-dock-${side}').getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right }; })()`);
+const box = (id) => ev(`(() => { const e = [...document.querySelectorAll('[data-ikm-dock-id="${id}"]')].find(x => x.getBoundingClientRect().width > 0); if (!e) return null; const r = e.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, cy: r.top + r.height / 2, h: r.height }; })()`);
 const zoneOf = (id) => ev(`(() => { const e = [...document.querySelectorAll('[data-ikm-dock-id="${id}"]')].find(x => x.parentElement && x.parentElement.hasAttribute('data-ikm-zone')); if (!e) return null; const k = e.parentElement.getAttribute('data-ikm-zone'); return k.startsWith('edge-left') ? 'edge-left' : k.startsWith('edge-right') ? 'edge-right' : k; })()`);
 async function clickSel(sel) {
   const c = await ev(`(() => { const e = [...document.querySelectorAll(${JSON.stringify(sel)})].find(x => x.getBoundingClientRect().width > 0); if (!e) return null; const r = e.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()`);
@@ -345,6 +351,64 @@ sc('move-real-feedback', 'Move the real feedback tab to the bottom left, use it 
   await T.dragToZone('feedback', 'edge-right'); await T.check('feedback put back on the right edge', ['feedback']);
 }, 1025);
 
+// A reader's own spot along an edge (host 0.1.0.28): a reader's-choice tab
+// stays where it is let go on an edge; tabs that would overlap are pushed
+// apart evenly; an edge with more tabs than fit folds the least important
+// into the bottom row.
+sc('edge-spot', "Drop a reader's-choice tab at the top, bottom and partway down an edge; it stays where it was let go, also after open/close and a reload", async (T) => {
+  await T.do('minimise zt-uc-b', "__dt.minimise('zt-uc-b')");
+  const rail = await railBox('left');
+  const x = rail.left + 13;
+  await T.dragTo('zt-uc-b', { x, y: rail.top + 10 }); await T.check('dropped at the top of the left edge');
+  let b = await box('zt-uc-b');
+  T.expect('at the top of the edge', Math.abs(b.top - rail.top) <= 2, `${Math.round(b.top)} vs ${Math.round(rail.top)}`);
+  // The edge's drop area stops short of the bottom row's catch area (44px
+  // reach + 8px) on short windows: aim just inside its lower end.
+  const lowest = Math.min(rail.bottom, (await ev('innerHeight')) - 32 - 44 - 8) - 6;
+  await T.dragTo('zt-uc-b', { x, y: lowest }); await T.check('dropped at the bottom of the left edge');
+  b = await box('zt-uc-b');
+  T.expect('at the bottom of the edge', Math.abs(b.bottom - rail.bottom) <= 2, `${Math.round(b.bottom)} vs ${Math.round(rail.bottom)}`);
+  const y = rail.top + (rail.bottom - rail.top) * 0.6;
+  await T.dragTo('zt-uc-b', { x, y }); await T.check('dropped 60% of the way down');
+  b = await box('zt-uc-b');
+  T.expect('centred where it was let go', Math.abs(b.cy - y) <= 2, `${Math.round(b.cy)} vs ${Math.round(y)}`);
+  await T.click('zt-uc-b'); await T.check('opened');
+  await T.do('minimise zt-uc-b', "__dt.minimise('zt-uc-b')"); await T.check('closed again');
+  b = await box('zt-uc-b');
+  T.expect('back at its spot after open and close', Math.abs(b.cy - y) <= 2, `${Math.round(b.cy)} vs ${Math.round(y)}`);
+  await T.reload(); await T.do('minimise zt-uc-b after reload', "__dt.minimise('zt-uc-b')"); await T.check('after reload');
+  b = await box('zt-uc-b');
+  T.expect('still at its spot after a reload', Math.abs(b.cy - y) <= 2, `${Math.round(b.cy)} vs ${Math.round(y)}`);
+}, 1025);
+sc('edge-collide', "Drop two reader's-choice tabs on the same spot, then one onto a fixed tab: nothing overlaps, and the pair share the spot evenly", async (T) => {
+  for (const id of ['zt-uc-a', 'zt-uc-b']) await T.do(`minimise ${id}`, `__dt.minimise('${id}')`);
+  const rail = await railBox('left');
+  const x = rail.left + 13;
+  const y = rail.top + (rail.bottom - rail.top) * 0.7;
+  await T.dragTo('zt-uc-a', { x, y }); await T.check('first tab dropped on the left edge');
+  await T.dragTo('zt-uc-b', { x, y }); await T.check('second tab dropped on the same spot');
+  const a = await box('zt-uc-a'), b = await box('zt-uc-b');
+  const da = a.cy - y, db = b.cy - y;
+  T.expect('pushed apart evenly around the drop point', Math.sign(da) !== Math.sign(db) && Math.abs(Math.abs(da) - Math.abs(db)) <= 3, `offsets ${Math.round(da)} and ${Math.round(db)}`);
+  await T.do('minimise zt-el-a', "__dt.minimise('zt-el-a')"); await T.check('a fixed tab joins the left edge');
+  const f = await box('zt-el-a');
+  await T.dragTo('zt-uc-b', { x, y: f.cy }); await T.check('dropped onto the fixed tab');
+}, 1025);
+sc('edge-overflow', 'More tabs than a short edge holds: the least important fold into the bottom row, and return when the window is taller', async (T) => {
+  await T.viewport(1366, 330);
+  const ids = ['zt-el-a', 'zt-el-b', 'zt-el-c', 'zt-elt-a', 'zt-elt-b', 'zt-uc-b'];
+  for (const id of ids) await T.do(`minimise ${id}`, `__dt.minimise('${id}')`);
+  await T.check('six tabs on a 330px-tall window');
+  const zones = {};
+  for (const id of ids) zones[id] = await zoneOf(id);
+  const folded = ids.filter((id) => String(zones[id]).startsWith('bottom'));
+  T.expect('some folded into the bottom row', folded.length > 0, JSON.stringify(zones));
+  T.expect('the rest stay on the left edge', ids.filter((id) => !folded.includes(id)).every((id) => zones[id] === 'edge-left'), JSON.stringify(zones));
+  await T.viewport(1366, 650); await T.wait(400); await T.check('window taller again');
+  for (const id of ids) zones[id] = await zoneOf(id);
+  T.expect('all back on the left edge', ids.every((id) => zones[id] === 'edge-left'), JSON.stringify(zones));
+}, 1025);
+
 // Office-screen matrix (CSS pixels the page actually gets).
 const VIEWPORTS = {
   'office-100': [1920, 950],
@@ -368,6 +432,7 @@ async function runCase(s, vpName) {
     async clickIfThere(id) { if (await ev(`!!__dt.center('${id}')`)) await click(id); rec.steps.push(`click ${id} again`); },
     async has(id) { return !!(await ev(`__dt.center('${id}')`)); },
     async drag(id, onto, past) { await drag(id, onto, past); rec.steps.push(`drag ${id} -> ${onto}`); const ns = await settle(); if (ns) rec.failures.push({ at: `drag ${id}`, v: [ns] }); },
+    async dragTo(id, point) { await dragTo(id, point); rec.steps.push(`drag ${id} to ${Math.round(point.x)},${Math.round(point.y)}`); const ns = await settle(); if (ns) rec.failures.push({ at: `drag ${id}`, v: [ns] }); },
     async dragToZone(id, key) { const seen = await dragToZone(id, key); rec.steps.push(`drag ${id} to ${key}`); const ns = await settle(); if (ns) rec.failures.push({ at: `drag ${id} to ${key}`, v: [ns] }); return seen; },
     expect(label, ok, got) { rec.steps.push(`EXPECT ${label}: ${ok ? 'ok' : 'FAIL'}`); if (!ok) rec.failures.push({ at: label, v: ['EXPECT: ' + label + ' (got ' + got + ')'] }); },
     async pullOut(id, stepPx) { await pullOut(id, stepPx); rec.steps.push(`pull ${id} out (${stepPx}px steps)`); const ns = await settle(); if (ns) rec.failures.push({ at: `pull ${id}`, v: [ns] }); },
