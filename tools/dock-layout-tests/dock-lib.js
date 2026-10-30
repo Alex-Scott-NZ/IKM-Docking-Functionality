@@ -193,11 +193,12 @@
     } catch (e) { return {}; }
   }
 
-  // Utilities a reader has put at their own spot on an edge (edgePos).
+  // Utilities a reader has put at their own spot (edgePos on an edge,
+  // rowPos in the top or bottom row).
   function ownSpots() {
     try {
       const places = (JSON.parse(localStorage.getItem('ikm-dock:place') || '{}').places) || {};
-      return Object.keys(places).filter((id) => typeof places[id].edgePos === 'number');
+      return Object.keys(places).filter((id) => typeof places[id].edgePos === 'number' || typeof places[id].rowPos === 'number');
     } catch (e) { return []; }
   }
 
@@ -247,8 +248,8 @@
         const gap = isColumn ? b.top - a.bottom : b.left - a.right;
         // A tab at a reader's own spot sits where it was put, so its gaps
         // vary: the whole-edge check below holds it to "never closer than one gap".
-        const free = isColumn && (spots.includes(visual[i - 1].id) || spots.includes(visual[i].id));
-        if (!free && Math.abs(gap - GAP) > TOL) v.push('SLOT-GAP: ' + key + ' ' + visual[i - 1].id + '->' + visual[i].id + ' gap ' + gap.toFixed(1) + 'px (expected ' + GAP + ')');
+        const free = spots.includes(visual[i - 1].id) || spots.includes(visual[i].id);
+        if (free ? gap < GAP - TOL : Math.abs(gap - GAP) > TOL) v.push('SLOT-GAP: ' + key + ' ' + visual[i - 1].id + '->' + visual[i].id + ' gap ' + gap.toFixed(1) + 'px (expected ' + GAP + ')');
         if (isColumn) {
           const side = key.indexOf('right') !== -1 ? 'right' : 'left';
           if (Math.abs(a[side] - b[side]) > TOL) v.push('SLOT-ALIGN: ' + key + ' ' + visual[i].id + ' ' + side + ' edge ' + b[side].toFixed(1) + ' vs ' + a[side].toFixed(1));
@@ -259,7 +260,8 @@
       // 3. Zone anchored where it belongs.
       const zr = z.getBoundingClientRect();
       if (zr.width > 0) {
-        if (key.indexOf('right') !== -1) {
+        // (The top row's gaps sit between SharePoint's own suite bar controls.)
+        if (key.indexOf('right') !== -1 && key.indexOf('top-') !== 0) {
           const want = W - clearance;
           if (Math.abs(zr.right - want) > TOL) v.push('ZONE-ANCHOR: ' + key + ' right edge at ' + zr.right.toFixed(1) + ', expected ' + want.toFixed(1) + ' (scrollbar clearance ' + clearance + ')');
         }
@@ -305,16 +307,30 @@
       if (ox > 1 && oy > 1) v.push('OVERLAP: ' + allChips[i].id + ' and ' + allChips[j].id);
     }
     // 6b. Never on top of SharePoint's own chrome (suite bar, app bar).
-    ['sp-appBar', 'SuiteNavWrapper'].forEach((cid) => {
+    ['sp-appBar', 'SuiteNavWrapper', 'spCommandBar'].forEach((cid) => {
       const c = document.getElementById(cid); if (!c) return;
       const b = c.getBoundingClientRect(); if (!b.width) return;
       // The bottom row sits in the app bar's empty bottom strip by design;
       // edge tabs must clear its buttons.
-      allChips.filter((L) => cid !== 'sp-appBar' || L.k.parentElement.className.indexOf('ikm-dock-zone-edge') !== -1).forEach((L) => {
+      // (The command bar can only ever meet an edge tab. The top row sits IN
+      // the suite bar by design; it is checked against the bar's controls below.)
+      const inTop = (L) => L.k.parentElement.className.indexOf('ikm-dock-zone-top') !== -1;
+      allChips.filter((L) => (cid === 'SuiteNavWrapper' && !inTop(L)) || L.k.parentElement.className.indexOf('ikm-dock-zone-edge') !== -1).forEach((L) => {
         const a = L.r;
         if (Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1) v.push('COVERS-SP: ' + L.id + ' covers SharePoint ' + cid);
       });
     });
+    // 6c. Top-row chips never cover anything clickable in the suite bar.
+    const suite = document.getElementById('SuiteNavWrapper');
+    if (suite) {
+      const ctrls = [...suite.querySelectorAll('a, button, #sbcId, input')].map((e) => ({ e, r: e.getBoundingClientRect() })).filter((x) => x.r.width > 0 && x.r.height > 0);
+      allChips.filter((L) => L.k.parentElement.className.indexOf('ikm-dock-zone-top') !== -1).forEach((L) => {
+        const a = L.r;
+        ctrls.forEach(({ e, r }) => {
+          if (Math.min(a.right, r.right) - Math.max(a.left, r.left) > 1 && Math.min(a.bottom, r.bottom) - Math.max(a.top, r.top) > 1) v.push('COVERS-SP: ' + L.id + ' covers suite bar control ' + (e.id || e.getAttribute('aria-label') || e.tagName));
+        });
+      });
+    }
     // 7. Leftover motion proxies.
     const px = document.querySelectorAll('.ikm-dock-motion-proxy').length;
     if (px) v.push('PROXY-LEFT: ' + px + ' motion proxies still in the page');

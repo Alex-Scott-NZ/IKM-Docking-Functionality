@@ -10,6 +10,8 @@ import {
   IDockingHostProperties,
   IIkmDock
 } from './contract';
+import { fitSizes, spreadAlong, widestGaps } from './dockLayout';
+import { cubicBezier } from './dockMotion';
 
 const STYLE_ID = 'ikm-dock-styles';
 const ROOT_ID = 'ikm-dock-host';
@@ -45,45 +47,20 @@ const EDGE_TAB_MIN_PX = 40;
 const DOCK_MOTION_MS = 240;
 const DOCK_MOTION_EASING: [number, number, number, number] = [0.2, 0, 0, 1]; // cubic-bezier, decelerate
 
-/**
- * A CSS cubic-bezier timing function as a JS function of progress 0..1
- * (Newton steps on x, falling back to bisection).
- */
-function cubicBezier(x1: number, y1: number, x2: number, y2: number): (t: number) => number {
-  const bx = (u: number): number => 3 * x1 * u * (1 - u) * (1 - u) + 3 * x2 * u * u * (1 - u) + u * u * u;
-  const by = (u: number): number => 3 * y1 * u * (1 - u) * (1 - u) + 3 * y2 * u * u * (1 - u) + u * u * u;
-  const dx = (u: number): number => 3 * x1 * (1 - u) * (1 - u) + 6 * (x2 - x1) * u * (1 - u) + 3 * (1 - x2) * u * u;
-  return (t: number): number => {
-    if (t <= 0) { return 0; }
-    if (t >= 1) { return 1; }
-    let u = t;
-    for (let i = 0; i < 6; i++) {
-      const d = dx(u);
-      if (Math.abs(d) < 1e-6) { break; }
-      const next = u - (bx(u) - t) / d;
-      if (next < 0 || next > 1) { break; }
-      u = next;
-    }
-    if (Math.abs(bx(u) - t) > 1e-4) {
-      let lo = 0;
-      let hi = 1;
-      for (let i = 0; i < 30; i++) {
-        u = (lo + hi) / 2;
-        if (bx(u) < t) { lo = u; } else { hi = u; }
-      }
-    }
-    return by(u);
-  };
-}
-
 interface IRegistered {
   descriptor: IDockDescriptor;
   element: HTMLElement | undefined;
 }
 
+/**
+ * Where a utility docks. 'top' is a reader-only row under SharePoint's
+ * command bar (admins cannot configure it, so it is not in the contract).
+ */
+type PlaceTarget = DockZone | 'top';
+
 /** Where a utility docks: a zone plus the side/cluster within it. */
 interface IPlacement {
-  target: DockZone;
+  target: PlaceTarget;
   bottomSide: 'left' | 'right';
   edgeAlign: 'top' | 'middle' | 'bottom';
   /**
@@ -92,10 +69,17 @@ interface IPlacement {
    * window. Unset = the admin's cluster (edgeAlign).
    */
   edgePos?: number;
+  /**
+   * A reader's own spot in the top or bottom row: the chip's centre as a
+   * fraction of the row's width. Unset = packed into the admin's corner.
+   * (bottomSide then says which half of the row it was dropped on.)
+   */
+  rowPos?: number;
 }
 
 /** The areas a reader can drop a movable chip on. */
-type DropKey = 'bottom-left' | 'bottom-right' | 'edge-left' | 'edge-right';
+type DropKey = 'bottom-left' | 'bottom-right' | 'edge-left' | 'edge-right' | 'top-left' | 'top-right';
+const ROW_KEYS: DropKey[] = ['bottom-left', 'bottom-right', 'top-left', 'top-right'];
 
 interface IDropTarget {
   key: DropKey;
@@ -147,6 +131,19 @@ export class DockManager {
   private _overflow: Set<string> = new Set();
   private _layingOut = false;
   private _railHeights: { [side: string]: number } = {};
+  private _rowWidths: { [row: string]: number } = {};
+  // Lowest bottom edge seen for SharePoint's sticky command bar since the
+  // last resize: it sits ~36px higher once the page scrolls, and the edge
+  // stays clear of where it comes back to rather than following it.
+  private _barBottom = 0;
+  // Chips are placed from their measured sizes, so a chip that changes size
+  // later (its icon font arriving, a new label) re-runs the layout.
+  private _sizeWatch: ResizeObserver | undefined;
+  private _layoutRaf = 0;
+  // Waits for SharePoint's command bar to render (see _watchCommandBar).
+  private _barWait: MutationObserver | undefined;
+  // Re-measures the top row when the suite bar changes (see _watchCommandBar).
+  private _suiteWatch: MutationObserver | undefined;
 
   // Drop targets on screen while a movable chip is being dragged.
   private _drops: IDropTarget[] = [];
@@ -158,6 +155,11 @@ export class DockManager {
   private _narrowQuery: MediaQueryList | undefined;
   private _onNarrowChange = (): void => this._rezone();
   private _onResize = (): void => {
+    this._barBottom = 0;
+    // After a resize the command bar can settle somewhere else a moment
+    // later (seen going from a 330px to a 650px-tall window, where the page
+    // had scrolled): look again once it has.
+    window.setTimeout(() => this._updateBottomRowOffset(), 300);
     if (this._resizeRaf) { return; }
     this._resizeRaf = window.requestAnimationFrame(() => {
       this._resizeRaf = 0;
@@ -173,6 +175,10 @@ export class DockManager {
   }
 
   public start(): void {
+    if (typeof ResizeObserver === 'function') {
+      this._sizeWatch = new ResizeObserver(() => this._scheduleRelayout());
+      this._watchCommandBar();
+    }
     this._injectStyles();
     this._buildZones();
     this._publishApi();
@@ -193,8 +199,57 @@ export class DockManager {
     this._log('started');
   }
 
+  /**
+   * Re-place everything next frame: the layout writes sizes itself, and
+   * doing that inside an observer's callback would loop.
+   */
+  private _scheduleRelayout(): void {
+    if (this._layoutRaf || this._disposed) { return; }
+    this._layoutRaf = window.requestAnimationFrame(() => {
+      this._layoutRaf = 0;
+      this._updateBottomRowOffset(); // re-places the rails and the top row
+      this._layoutDock();
+    });
+  }
+
+  /**
+   * SharePoint renders its page command bar and the suite bar's search box
+   * after the host starts; the right rail has to start below the one and
+   * the top row's gaps are measured around the other. Wait for them to
+   * appear, then let the size watcher re-place everything when they change.
+   */
+  private _watchCommandBar(): void {
+    const watched = new Set<string>();
+    const found = (): boolean => {
+      ['spCommandBar', 'sbcId'].forEach((elId) => {
+        const el = document.getElementById(elId);
+        if (el && this._sizeWatch && !watched.has(elId)) { this._sizeWatch.observe(el); watched.add(elId); }
+      });
+      // The suite bar's controls render in stages and the bar collapses to a
+      // thin strip on short windows (seen at 960x470, a few seconds after
+      // load): any change in it re-measures the top row's gaps. Measuring
+      // only the search box left a chip over the app name.
+      const suite = document.getElementById('SuiteNavWrapper');
+      if (suite && !this._suiteWatch && typeof MutationObserver === 'function') {
+        this._suiteWatch = new MutationObserver(() => this._scheduleRelayout());
+        this._suiteWatch.observe(suite, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style'] });
+        if (this._sizeWatch) { this._sizeWatch.observe(suite); }
+      }
+      return watched.size === 2 && !!this._suiteWatch;
+    };
+    if (found() || typeof MutationObserver !== 'function') { return; }
+    this._barWait = new MutationObserver(() => {
+      if (found() && this._barWait) { this._barWait.disconnect(); this._barWait = undefined; }
+    });
+    this._barWait.observe(document.body, { childList: true, subtree: true });
+    // Pages without a command bar: stop looking after a while.
+    window.setTimeout(() => { if (this._barWait) { this._barWait.disconnect(); this._barWait = undefined; } }, 15000);
+  }
+
   public dispose(): void {
     this._disposed = true;
+    if (this._barWait) { this._barWait.disconnect(); }
+    if (this._suiteWatch) { this._suiteWatch.disconnect(); }
     document.removeEventListener('scroll', this._onScrollCapture, true);
     window.removeEventListener('resize', this._onResize);
     if (this._narrowQuery && this._narrowQuery.removeEventListener) {
@@ -206,6 +261,10 @@ export class DockManager {
     if (window.cancelAnimationFrame && this._resizeRaf) {
       window.cancelAnimationFrame(this._resizeRaf);
     }
+    if (window.cancelAnimationFrame && this._layoutRaf) {
+      window.cancelAnimationFrame(this._layoutRaf);
+    }
+    if (this._sizeWatch) { this._sizeWatch.disconnect(); }
     if ((window as unknown as { ikmDock?: IIkmDock }).ikmDock) {
       delete (window as unknown as { ikmDock?: IIkmDock }).ikmDock;
     }
@@ -255,7 +314,7 @@ export class DockManager {
       if (el && el.parentElement !== this._zoneFor(id)) { this._update(id, {}); }
     });
     this._updateBottomRowOffset();
-    this._layoutRails();
+    this._layoutDock();
   }
 
   /** Re-evaluate visibility (edit mode toggles, SPA navigation). */
@@ -428,6 +487,18 @@ export class DockManager {
       return { left, top, width: w, height: h };
     }
     const zr = zone.getBoundingClientRect();
+    if (zone.className.indexOf('ikm-dock-zone-row') !== -1 && zr.width > 0) {
+      // Empty row cluster (the zone spans the whole row): its corner, or the
+      // reader's own spot, chip-sized. The bottom row hangs up from its
+      // line, the top row down from it.
+      const p = this._placement(id);
+      const w = 32;
+      const left = typeof p.rowPos === 'number'
+        ? zr.left + p.rowPos * zr.width - w / 2
+        : zone.className.indexOf('ikm-dock-right') !== -1 ? zr.right - w : zr.left;
+      const top = zone.className.indexOf('ikm-dock-zone-top') !== -1 ? zr.top : zr.bottom - 30;
+      return { left, top, width: w, height: 30 };
+    }
     if (zr.left !== 0 || zr.top !== 0 || zr.width !== 0 || zr.height !== 0) {
       // Empty zone: its anchor, chip-sized.
       return { left: zr.left, top: zr.top, width: Math.max(zr.width, 32), height: Math.max(zr.height, 32) };
@@ -621,9 +692,10 @@ export class DockManager {
     const entry = this._registered.get(id);
     if (!entry) { return; }
     const remove = (): void => {
+      if (entry.element && this._sizeWatch) { this._sizeWatch.unobserve(entry.element); }
       entry.element?.remove();
       this._registered.delete(id);
-      this._layoutRails();
+      this._layoutDock();
     };
     if (inPlace) { remove(); } else { this._slideNeighbours(remove); }
     this._applyArbitration();
@@ -642,6 +714,7 @@ export class DockManager {
       this._applyOpenState(entry.element, entry.descriptor);
       return;
     }
+    if (entry.element && this._sizeWatch) { this._sizeWatch.unobserve(entry.element); }
     entry.element?.remove();
     entry.element = undefined;
     this._renderEntry(entry);
@@ -708,8 +781,12 @@ export class DockManager {
     // position: fixed either way, so visuals don't depend on the parent.
     const bottomParent = this._bottomHost || root;
     if (this._bottomHost) { this._bottomHost.classList.add('ikm-dock-bottom-host'); }
-    this._zones['bottom-left'] = mk('ikm-dock-zone-bottom ikm-dock-left', bottomParent);
-    this._zones['bottom-right'] = mk('ikm-dock-zone-bottom ikm-dock-right', bottomParent);
+    this._zones['bottom-left'] = mk('ikm-dock-zone-row ikm-dock-zone-bottom ikm-dock-left', bottomParent);
+    this._zones['bottom-right'] = mk('ikm-dock-zone-row ikm-dock-zone-bottom ikm-dock-right', bottomParent);
+    // The top row: under SharePoint's command bar, between the two edges
+    // (so it never meets an edge tab). Readers only; placed in _positionRails.
+    this._zones['top-left'] = mk('ikm-dock-zone-row ikm-dock-zone-top ikm-dock-left', root);
+    this._zones['top-right'] = mk('ikm-dock-zone-row ikm-dock-zone-top ikm-dock-right', root);
     // Each edge is one rail holding its top, middle and bottom clusters.
     // The clusters only group tabs; _placeTabs positions every tab on the
     // edge in one pass, together with tabs a reader put at their own spot,
@@ -730,6 +807,13 @@ export class DockManager {
 
   private _zoneFor(id: string): HTMLElement {
     const p = this._placement(id);
+    if (p.target === 'top' && !this._overflow.has(id)) {
+      return this._zones[p.bottomSide === 'left' ? 'top-left' : 'top-right'];
+    }
+    if (p.target === 'top') {
+      // Its gap in the suite bar is too small: the bottom row, same side.
+      return this._zones[p.bottomSide === 'left' ? 'bottom-left' : 'bottom-right'];
+    }
     if (p.target !== 'bottom' && !this._isNarrow() && !this._overflow.has(id)) {
       // A reader's own spot is positioned by _placeTabs; the middle
       // cluster just holds it.
@@ -741,17 +825,21 @@ export class DockManager {
   // ---------------------------------------------------- edge tab layout
 
   /**
-   * Position every tab on both edges. Runs whenever an edge's tabs or size
-   * change. First decides which tabs still fit on their edge (the rest fold
-   * into the bottom row), then places what is left.
+   * Position every chip and tab: both edges and the bottom row. Runs
+   * whenever their contents or size change. First decides which tabs still
+   * fit on their edge (the rest fold into the bottom row), then places
+   * what is left.
    */
-  private _layoutRails(): void {
+  private _layoutDock(): void {
     if (this._layingOut || !this._root) { return; }
     this._layingOut = true;
     try {
       if (this._computeOverflow()) { this._rezone(); }
       this._placeTabs('left');
       this._placeTabs('right');
+      this._placeRow('bottom', this._zones['bottom-left'], this._zones['bottom-right']);
+      this._placeRow('top-left', this._zones['top-left']);
+      this._placeRow('top-right', this._zones['top-right']);
     } finally {
       this._layingOut = false;
     }
@@ -781,10 +869,24 @@ export class DockManager {
           .forEach((id) => next.add(id));
       });
     }
+    ['left', 'right'].forEach((side) => {
+      const z = this._zones[`top-${side}`];
+      const width = z ? z.clientWidth : 0;
+      const capacity = Math.max(0, Math.floor((width + EDGE_GAP_PX) / (EDGE_TAB_MIN_PX + EDGE_GAP_PX)));
+      const ids: string[] = [];
+      this._registered.forEach((_entry, id) => {
+        const p = this._placement(id);
+        if (p.target === 'top' && (p.bottomSide === 'left' ? 'left' : 'right') === side) { ids.push(id); }
+      });
+      ids
+        .sort((a, b) => this._priorityOfId(a) - this._priorityOfId(b) || (a < b ? -1 : 1))
+        .slice(capacity)
+        .forEach((id) => next.add(id));
+    });
     const changed = next.size !== this._overflow.size || Array.from(next).some((id) => !this._overflow.has(id));
     if (changed) {
       this._overflow = next;
-      if (next.size) { this._log(`edge full, folded into the bottom row: ${Array.from(next).join(',')}`); }
+      if (next.size) { this._log(`no room, folded into the bottom row: ${Array.from(next).join(',')}`); }
     }
     return changed;
   }
@@ -792,11 +894,8 @@ export class DockManager {
   /**
    * Lay out one edge's tabs. Each tab has a spot it wants: a reader's own
    * spot (edgePos), or its admin cluster stacked from the top, around the
-   * upper quarter (middle) or from the bottom. Tabs that would overlap are
-   * pushed apart evenly from where they want to be: neighbours are merged
-   * into a block centred on the average of their wishes, kept on the edge
-   * (pool adjacent violators, so nobody moves further than necessary). On a
-   * crowded edge the tabs first shrink towards EDGE_TAB_MIN_PX.
+   * upper quarter (middle) or from the bottom. spreadAlong keeps them apart.
+   * On a crowded edge the tabs first shrink towards EDGE_TAB_MIN_PX.
    */
   private _placeTabs(side: string): void {
     const rail = this._rails[side];
@@ -810,81 +909,102 @@ export class DockManager {
 
     // Natural heights: clear any squeeze first, then read them all at once.
     tabs.forEach((el) => { el.style.height = ''; });
-    const natural = new Map<HTMLElement, number>();
-    tabs.forEach((el) => natural.set(el, el.offsetHeight));
-    const heights = new Map<HTMLElement, number>(natural);
-    const gaps = EDGE_GAP_PX * (tabs.length - 1);
-    const total = tabs.reduce((s, el) => s + (natural.get(el) || 0), 0);
-    if (total + gaps > railH) {
-      const spare = tabs.reduce((s, el) => s + Math.max(0, (natural.get(el) || 0) - EDGE_TAB_MIN_PX), 0);
-      const factor = spare > 0 ? Math.max(0, Math.min(1, (railH - gaps - tabs.length * EDGE_TAB_MIN_PX) / spare)) : 0;
-      tabs.forEach((el) => {
-        const h = natural.get(el) || 0;
-        heights.set(el, h > EDGE_TAB_MIN_PX ? EDGE_TAB_MIN_PX + (h - EDGE_TAB_MIN_PX) * factor : h);
-      });
-    }
+    const natural = tabs.map((el) => el.offsetHeight);
+    const fitted = fitSizes(natural, railH, EDGE_GAP_PX, EDGE_TAB_MIN_PX);
+    const size = new Map<HTMLElement, number>();
+    tabs.forEach((el, i) => size.set(el, fitted[i]));
 
-    // Where each tab wants to be (its top edge).
     const ownSpot = (el: HTMLElement): number | undefined => {
-      const id = el.getAttribute('data-ikm-dock-id') || '';
-      const p = this._placement(id);
+      const p = this._placement(el.getAttribute('data-ikm-dock-id') || '');
       return typeof p.edgePos === 'number' ? p.edgePos : undefined;
     };
-    const stackH = (els: HTMLElement[]): number =>
-      els.reduce((s, el) => s + (heights.get(el) || 0), 0) + EDGE_GAP_PX * Math.max(0, els.length - 1);
     const fixed = clusters.map((c) => c.filter((el) => ownSpot(el) === undefined));
+    const stackH = (els: HTMLElement[]): number =>
+      els.reduce((sum, el) => sum + (size.get(el) || 0), 0) + EDGE_GAP_PX * Math.max(0, els.length - 1);
     const topH = stackH(fixed[0]);
     const midH = stackH(fixed[1]);
     const botH = stackH(fixed[2]);
     // The middle cluster sits about a quarter of the way down the free space,
     // as it always has.
     const starts = [0, topH + Math.max(0, railH - topH - midH - botH) * 0.25, railH - botH];
-    const wants: { el: HTMLElement; want: number; h: number; seq: number }[] = [];
+    const want = new Map<HTMLElement, number>();
     fixed.forEach((cluster, ci) => {
       let y = starts[ci];
-      cluster.forEach((el) => {
-        const h = heights.get(el) || 0;
-        wants.push({ el, want: y, h, seq: wants.length });
-        y += h + EDGE_GAP_PX;
-      });
+      cluster.forEach((el) => { want.set(el, y); y += (size.get(el) || 0) + EDGE_GAP_PX; });
     });
     tabs.forEach((el) => {
       const f = ownSpot(el);
-      if (f === undefined) { return; }
-      const h = heights.get(el) || 0;
-      wants.push({ el, want: f * railH - h / 2, h, seq: wants.length });
-    });
-    wants.sort((a, b) => a.want - b.want || a.seq - b.seq);
-
-    // Merge overlapping neighbours into blocks centred on their average wish.
-    const clamp = (top: number, h: number): number => Math.max(0, Math.min(railH - h, top));
-    interface IBlock { items: typeof wants; h: number; sum: number; top: number }
-    const blocks: IBlock[] = [];
-    wants.forEach((w) => {
-      let cur: IBlock = { items: [w], h: w.h, sum: w.want, top: clamp(w.want, w.h) };
-      while (blocks.length > 0) {
-        const prev = blocks[blocks.length - 1];
-        if (prev.top + prev.h + EDGE_GAP_PX <= cur.top) { break; }
-        blocks.pop();
-        // Each member's wish, less its offset within the merged block.
-        const shift = prev.h + EDGE_GAP_PX;
-        const n = prev.items.length + cur.items.length;
-        const sum = prev.sum + cur.sum - shift * cur.items.length;
-        const h = prev.h + EDGE_GAP_PX + cur.h;
-        cur = { items: prev.items.concat(cur.items), h, sum, top: clamp(sum / n, h) };
-      }
-      blocks.push(cur);
+      if (f !== undefined) { want.set(el, f * railH - (size.get(el) || 0) / 2); }
     });
 
-    blocks.forEach((b) => {
-      let y = b.top;
-      b.items.forEach((w) => {
-        const top = `${Math.round(y)}px`;
-        if (w.el.style.top !== top) { w.el.style.top = top; }
-        const squeezed = w.h < (natural.get(w.el) || 0) - 0.5;
-        w.el.style.height = squeezed ? `${Math.floor(w.h)}px` : '';
-        y += w.h + EDGE_GAP_PX;
-      });
+    const tops = spreadAlong(tabs.map((el, seq) => ({ want: want.get(el) || 0, size: size.get(el) || 0, seq })), railH, EDGE_GAP_PX);
+    tabs.forEach((el, i) => {
+      const top = `${Math.round(tops[i])}px`;
+      if (el.style.top !== top) { el.style.top = top; }
+      el.style.height = fitted[i] < natural[i] - 0.5 ? `${Math.floor(fitted[i])}px` : '';
+    });
+  }
+
+  /**
+   * Lay out a row strip: the bottom row (both bottom zones span one strip)
+   * or one of the top row's two gaps (each its own strip). Back-to-top
+   * keeps the bottom-right corner; the admin's left cluster packs from the
+   * left, the right cluster from the right (back-to-top) leftwards; a
+   * reader's own spot (rowPos) is where it was let go. spreadAlong keeps
+   * them apart; a crowded strip shrinks its chips first.
+   */
+  private _placeRow(strip: string, leftZone: HTMLElement | undefined, rightZone?: HTMLElement): void {
+    if (!leftZone) { return; }
+    const row = strip.indexOf('top') === 0 ? 'top' : 'bottom';
+    const span = leftZone.clientWidth;
+    this._rowWidths[strip] = span;
+    const kids = (z: HTMLElement | undefined): HTMLElement[] => z ? Array.prototype.slice.call(z.children) as HTMLElement[] : [];
+    const isCorner = (el: HTMLElement): boolean => el.getAttribute('data-ikm-dock-id') === 'back-to-top';
+    const corner = kids(rightZone).filter(isCorner)[0];
+    const chips = kids(leftZone).concat(kids(rightZone)).filter((el) => !isCorner(el));
+    if (span <= 0) { return; }
+    let limit = span;
+    if (corner && rightZone) {
+      const w = corner.offsetWidth;
+      const left = `${Math.round(span - w)}px`;
+      if (corner.style.left !== left) { corner.style.left = left; }
+      limit = span - w - EDGE_GAP_PX;
+    }
+    if (chips.length === 0) { return; }
+
+    chips.forEach((el) => { el.style.width = ''; });
+    const natural = chips.map((el) => el.offsetWidth);
+    const fitted = fitSizes(natural, limit, EDGE_GAP_PX, EDGE_TAB_MIN_PX);
+    const size = new Map<HTMLElement, number>();
+    chips.forEach((el, i) => size.set(el, fitted[i]));
+
+    const ownSpot = (el: HTMLElement): number | undefined => {
+      const p = this._placement(el.getAttribute('data-ikm-dock-id') || '');
+      return p.target === row && typeof p.rowPos === 'number' ? p.rowPos : undefined;
+    };
+    const want = new Map<HTMLElement, number>();
+    let x = 0;
+    kids(leftZone).filter((el) => ownSpot(el) === undefined).forEach((el) => {
+      want.set(el, x);
+      x += (size.get(el) || 0) + EDGE_GAP_PX;
+    });
+    // Right cluster: DOM-first sits nearest the corner (row-reverse).
+    x = limit;
+    kids(rightZone).filter((el) => !isCorner(el) && ownSpot(el) === undefined).forEach((el) => {
+      x -= size.get(el) || 0;
+      want.set(el, x);
+      x -= EDGE_GAP_PX;
+    });
+    chips.forEach((el) => {
+      const f = ownSpot(el);
+      if (f !== undefined) { want.set(el, f * span - (size.get(el) || 0) / 2); }
+    });
+
+    const lefts = spreadAlong(chips.map((el, seq) => ({ want: want.get(el) || 0, size: size.get(el) || 0, seq })), limit, EDGE_GAP_PX);
+    chips.forEach((el, i) => {
+      const left = `${Math.round(lefts[i])}px`;
+      if (el.style.left !== left) { el.style.left = left; }
+      el.style.width = fitted[i] < natural[i] - 0.5 ? `${Math.floor(fitted[i])}px` : '';
     });
   }
 
@@ -944,20 +1064,24 @@ export class DockManager {
   /** The drop target a zone belongs to (edge clusters all count as their edge). */
   private _targetKeyOf(zone: HTMLElement | null): DropKey | undefined {
     const k = zone ? zone.getAttribute('data-ikm-zone') || '' : '';
-    if (k === 'bottom-left' || k === 'bottom-right') { return k; }
+    if (ROW_KEYS.indexOf(k as DropKey) !== -1) { return k as DropKey; }
     if (k.indexOf('edge-left') === 0) { return 'edge-left'; }
     if (k.indexOf('edge-right') === 0) { return 'edge-right'; }
     return undefined;
   }
 
   private _placementKey(p: IPlacement): DropKey {
-    return p.target === 'bottom' ? (p.bottomSide === 'left' ? 'bottom-left' : 'bottom-right') : p.target;
+    if (p.target === 'bottom' || p.target === 'top') {
+      return `${p.target}-${p.bottomSide === 'left' ? 'left' : 'right'}` as DropKey;
+    }
+    return p.target;
   }
 
   /**
    * While a movable chip is dragged, every zone it can go to lights up
-   * (like window snap areas). Narrow screens fold the edges into the bottom
-   * row, so only the two bottom areas are offered there.
+   * (like window snap areas): the top and bottom rows' halves and both
+   * edges. Narrow screens fold the edges into the bottom row, so only the
+   * rows are offered there.
    */
   private _showDropTargets(id: string): void {
     this._hideDropTargets();
@@ -985,21 +1109,42 @@ export class DockManager {
       'bottom-left': { left: 0, top: bottomTop - reach, width: W / 2, height: H - bottomTop + reach },
       'bottom-right': { left: W / 2, top: bottomTop - reach, width: W / 2, height: H - bottomTop + reach }
     };
+    // The top row's two gaps in the suite bar, where there is room. The
+    // catch area reaches down onto the page but not across SharePoint's own
+    // controls either side.
+    (['top-left', 'top-right'] as DropKey[]).forEach((k) => {
+      const z = this._zones[k];
+      const r = z ? z.getBoundingClientRect() : undefined;
+      if (!r || r.width < EDGE_TAB_MIN_PX) { return; }
+      rects[k] = { left: r.left, top: r.top, width: r.width, height: chipH };
+      hits[k] = { left: r.left, top: 0, width: r.width, height: r.top + chipH + reach };
+    });
     if (!this._isNarrow()) {
-      const rail = (this._rails.left || this._rails.right) as HTMLElement | undefined;
-      const rr = rail ? rail.getBoundingClientRect() : undefined;
-      const top = rr && rr.height > 0 ? rr.top : H * 0.1;
-      const bottom = Math.min(rr && rr.height > 0 ? rr.bottom : H * 0.9, bottomTop - reach - 8);
+      // Each edge's own span: the right one starts below SharePoint's command
+      // bar (its area used to cover Share and Edit when both took the left
+      // edge's measurements).
+      const span = (side: string): { top: number; bottom: number } => {
+        const rail = this._rails[side];
+        const rr = rail ? rail.getBoundingClientRect() : undefined;
+        const top = rr && rr.height > 0 ? rr.top : H * 0.1;
+        return { top, bottom: Math.min(rr && rr.height > 0 ? rr.bottom : H * 0.9, bottomTop - reach - 8) };
+      };
+      const ls = span('left');
+      const rs = span('right');
       const leftX = this._rails.left ? parseFloat(this._rails.left.style.left) || 0 : 0;
       const rightX = W - rightPad - tabW;
-      rects['edge-left'] = { left: leftX, top, width: tabW, height: bottom - top };
-      rects['edge-right'] = { left: rightX, top, width: tabW, height: bottom - top };
-      hits['edge-left'] = { left: 0, top, width: leftX + tabW + reach, height: bottom - top };
-      hits['edge-right'] = { left: rightX - reach, top, width: W - rightX + reach, height: bottom - top };
+      rects['edge-left'] = { left: leftX, top: ls.top, width: tabW, height: ls.bottom - ls.top };
+      rects['edge-right'] = { left: rightX, top: rs.top, width: tabW, height: rs.bottom - rs.top };
+      hits['edge-left'] = { left: 0, top: ls.top, width: leftX + tabW + reach, height: ls.bottom - ls.top };
+      hits['edge-right'] = { left: rightX - reach, top: rs.top, width: W - rightX + reach, height: rs.bottom - rs.top };
     }
     const names: { [k in DropKey]: string } = {
-      'bottom-left': 'Bottom left', 'bottom-right': 'Bottom right', 'edge-left': 'Left edge', 'edge-right': 'Right edge'
+      'bottom-left': 'Bottom left', 'bottom-right': 'Bottom right', 'edge-left': 'Left edge', 'edge-right': 'Right edge',
+      'top-left': 'Top left', 'top-right': 'Top right'
     };
+    // A chip lands exactly where it is let go, so say so: readers otherwise
+    // took each strip for one fixed slot and never tried its top.
+    const hint = (k: DropKey): string => k.indexOf('edge') === 0 ? ', top to bottom' : '';
     const home = this._placementKey(this._defaultPlacement(id));
     (Object.keys(rects) as DropKey[]).forEach((k) => {
       const r = rects[k] as IDockRect;
@@ -1013,7 +1158,7 @@ export class DockManager {
       el.style.height = `${r.height}px`;
       const label = document.createElement('span');
       label.className = 'ikm-dock-drop-label';
-      label.textContent = k === home ? `${names[k]} (default)` : names[k];
+      label.textContent = `${names[k]}${k === home ? ' (default)' : ''}: drop anywhere${hint(k)}`;
       el.appendChild(label);
       (this._root as HTMLElement).appendChild(el);
       this._drops.push({ key: k, el, rect: r, hit: hits[k] as IDockRect });
@@ -1055,8 +1200,18 @@ export class DockManager {
     const current = this._placement(id);
     const rail = this._rails[key === 'edge-left' ? 'left' : 'right'];
     const rr = rail ? rail.getBoundingClientRect() : undefined;
-    const place: IPlacement = key.indexOf('bottom') === 0
-      ? { target: 'bottom', bottomSide: key === 'bottom-left' ? 'left' : 'right', edgeAlign: current.edgeAlign }
+    const isRow = ROW_KEYS.indexOf(key) !== -1;
+    const rowName = key.indexOf('top') === 0 ? 'top' : 'bottom';
+    const row = this._zones[rowName === 'top' ? key : 'bottom-left'];
+    const rowRect = row ? row.getBoundingClientRect() : undefined;
+    const place: IPlacement = isRow
+      ? {
+        target: rowName,
+        bottomSide: key.indexOf('-left') !== -1 ? 'left' : 'right',
+        edgeAlign: current.edgeAlign,
+        // Its centre where it was let go, along the row.
+        rowPos: rowRect && rowRect.width > 0 ? Math.max(0, Math.min(1, (x - rowRect.left) / rowRect.width)) : undefined
+      }
       : {
         target: key as 'edge-left' | 'edge-right',
         bottomSide: current.bottomSide,
@@ -1064,11 +1219,7 @@ export class DockManager {
         // Its centre where it was let go, along the edge.
         edgePos: rr && rr.height > 0 ? Math.max(0, Math.min(1, (y - rr.top) / rr.height)) : 0.25
       };
-    const def = this._defaultPlacement(id);
-    // Back home in the bottom row = forget the pick. An edge spot is always
-    // the reader's own, so it is kept.
-    const isDefault = key.indexOf('bottom') === 0 && this._placementKey(def) === key;
-    this._savePlace(id, isDefault ? undefined : place); // back home = forget the pick
+    this._savePlace(id, place);
     const entry = this._registered.get(id);
     if (!entry) { return; }
     this._slideNeighbours(() => {
@@ -1076,11 +1227,8 @@ export class DockManager {
       const el = entry.element;
       const zone = el && el.parentElement;
       if (!el || !zone) { return; }
+      // The layout pass has already put it at the drop point.
       el.classList.remove('ikm-dock-enter');
-      // On an edge _placeTabs has already put it at the drop point.
-      if (zone.className.indexOf('ikm-dock-zone-edge') !== -1) { return; }
-      this._reorderToPointer(el, zone, x, false);
-      this._persistZoneOrder(zone);
     }, () => entry.element);
     this._updateBottomRowOffset();
     const el = entry.element;
@@ -1230,9 +1378,8 @@ export class DockManager {
       const settleTy = ty;
       tx = 0;
       ty = 0;
-      // On an edge a reader's-choice tab goes where it is let go, even on
-      // its own edge; in the bottom row its own zone means a reorder.
-      if (movable && dropKey && (dropKey !== homeKey || dropKey.indexOf('edge') === 0)) {
+      // A reader's-choice chip goes where it is let go, its own zone included.
+      if (movable && dropKey) {
         this._moveTo(id, dropKey, lastX, lastY, heldAt);
         return;
       }
@@ -1270,9 +1417,9 @@ export class DockManager {
       const isColumn = zone.className.indexOf('ikm-dock-zone-edge') !== -1;
       overKey = movable ? this._hitDropTarget(e.clientX, e.clientY) : homeKey;
       // Reorder only while over its own zone; over another it is moving.
-      // A reader's-choice tab on an edge is never reordered: it is placed
-      // where it is let go.
-      if (overKey === homeKey && !(movable && isColumn)) {
+      // A reader's-choice chip is never reordered: it is placed where it is
+      // let go.
+      if (overKey === homeKey && !movable) {
         this._reorderToPointer(el, zone, isColumn ? e.clientY : e.clientX, true);
       }
       followPointer(e, isColumn);
@@ -1359,7 +1506,7 @@ export class DockManager {
     const others = movable.concat(pinned);
     const before = others.map((o) => ({ o, r: o.getBoundingClientRect() }));
     desired.forEach((n) => zone.appendChild(n));
-    if (isColumn) { this._layoutRails(); }
+    this._layoutDock();
     if (!animateOthers) { return; }
     before.forEach(({ o, r }) => {
       const a = o.getBoundingClientRect();
@@ -1431,7 +1578,8 @@ export class DockManager {
     // Reader's saved drag-order for this page wins over priority placement.
     this._applyReaderOrder(zone);
     entry.element = el;
-    this._layoutRails();
+    if (this._sizeWatch) { this._sizeWatch.observe(el); }
+    this._layoutDock();
     // The layout found this edge full and re-rendered the chip in the
     // bottom row: that render owns the entrance.
     if (entry.element !== el) { return; }
@@ -1561,11 +1709,20 @@ export class DockManager {
     const zone = this._zones['bottom-right'];
     if (!zone) { return; }
     const rightPx = `${this._scrollbarClearancePx()}px`;
-    if (zone.style.right !== rightPx) { zone.style.right = rightPx; }
+    // Both bottom zones span the same strip, so the layout pass can place
+    // a reader's chip anywhere along it.
+    [zone, this._zones['bottom-left']].forEach((z) => { if (z && z.style.right !== rightPx) { z.style.right = rightPx; } });
     this._positionRails(rightPx);
-    const zRect = zone.getBoundingClientRect();
-    if (zRect.width === 0) { return; }
-    const clearRight = Math.round(window.innerWidth - zRect.left + 8);
+    if (zone.clientWidth !== this._rowWidths.bottom) { this._layoutDock(); }
+    this._positionTopRow();
+    // The legacy pill clears the right cluster, which starts at its
+    // leftmost chip now that the zone itself spans the row.
+    const lefts = (Array.prototype.slice.call(zone.children) as HTMLElement[])
+      .map((c) => c.getBoundingClientRect())
+      .filter((r) => r.width > 0)
+      .map((r) => r.left);
+    if (lefts.length === 0) { return; }
+    const clearRight = Math.round(window.innerWidth - Math.min.apply(Math, lefts) + 8);
     const candidates = document.querySelectorAll('[class*="eedback"]');
     for (let i = 0; i < candidates.length; i++) {
       const el = candidates[i] as HTMLElement;
@@ -1589,14 +1746,78 @@ export class DockManager {
     if (right.style.right !== rightPx) { right.style.right = rightPx; }
     const suite = document.getElementById('SuiteNavWrapper') || document.getElementById('SuiteNavPlaceHolder');
     const suiteBottom = suite ? suite.getBoundingClientRect().bottom : 0;
-    const top = `${Math.round(Math.max(window.innerHeight * 0.1, suiteBottom + 8))}px`;
-    [left, right].forEach((r) => { if (r.style.top !== top) { r.style.top = top; } });
+    const baseTop = Math.max(window.innerHeight * 0.1, suiteBottom + 8);
+    // SharePoint's page command bar is sticky and reaches the right edge:
+    // a tab at the top of that edge covered its Share and Edit buttons. A
+    // rail it reaches starts below the lowest point it has been (see
+    // _barBottom), so the tabs do not shift as the page scrolls.
+    const bar = document.getElementById('spCommandBar');
+    const br = bar ? bar.getBoundingClientRect() : undefined;
+    if (br && br.height > 0) { this._barBottom = Math.max(this._barBottom, br.bottom); }
+    const tabW = 32;
+    [left, right].forEach((r) => {
+      const rr = r.getBoundingClientRect();
+      const x0 = r === right ? rr.right - tabW : rr.left;
+      const reaches = !!br && br.height > 0 && br.bottom < window.innerHeight / 2 &&
+        br.left < x0 + tabW && br.right > x0;
+      const top = `${Math.round(reaches ? Math.max(baseTop, this._barBottom + 8) : baseTop)}px`;
+      if (r.style.top !== top) { r.style.top = top; }
+    });
+    this._positionTopRow();
     const appBar = document.getElementById('sp-appBar');
     const ab = appBar ? appBar.getBoundingClientRect() : undefined;
     const leftPx = `${ab && ab.width > 0 && ab.left < 80 ? Math.round(ab.right) : 0}px`;
     if (left.style.left !== leftPx) { left.style.left = leftPx; }
     if (left.clientHeight !== this._railHeights.left || right.clientHeight !== this._railHeights.right) {
-      this._layoutRails();
+      this._layoutDock();
+    }
+  }
+
+  /**
+   * The top row lives in the empty parts of SharePoint's suite bar: top
+   * left between the app name and the search box, top right between the
+   * search box and the first icon (settings, help...). Measured at whatever
+   * width the reader has, so nothing of SharePoint's is ever covered; a gap
+   * too small for a chip takes none (its chips fold into the bottom row,
+   * see _computeOverflow).
+   */
+  private _positionTopRow(): void {
+    const tl = this._zones['top-left'];
+    const tr = this._zones['top-right'];
+    if (!tl || !tr) { return; }
+    const W = window.innerWidth;
+    const bar = document.getElementById('O365_HeaderLeftRegion') || document.getElementById('SuiteNavWrapper');
+    const barRect = bar ? bar.getBoundingClientRect() : undefined;
+    const search = document.getElementById('sbcId');
+    const sr = search ? search.getBoundingClientRect() : undefined;
+    // Everything clickable in the bar is an obstacle, padded by one gap.
+    const wrap = document.getElementById('SuiteNavWrapper');
+    const blocks: { l: number; r: number }[] = [];
+    if (wrap && barRect) {
+      const els = Array.prototype.slice.call(wrap.querySelectorAll('a, button, #sbcId, input')) as HTMLElement[];
+      els.forEach((el) => {
+        const r = el.getBoundingClientRect();
+        // Only the bar's own row (a banner injected above it is not ours to judge).
+        if (r.width > 0 && r.height > 0 && r.bottom > barRect.top && r.top < barRect.bottom) {
+          blocks.push({ l: r.left - EDGE_GAP_PX, r: r.right + EDGE_GAP_PX });
+        }
+      });
+    }
+    const split = sr && sr.width > 0 ? sr.left + sr.width / 2 : W / 2;
+    const sides = widestGaps(blocks, W, split);
+    const chipH = 30;
+    const top = `${Math.round(barRect && barRect.height > 0 ? barRect.top + (barRect.height - chipH) / 2 : 9)}px`;
+    ([[tl, sides.left], [tr, sides.right]] as [HTMLElement, { l: number; r: number } | undefined][]).forEach(([z, g]) => {
+      // No room for even one chip: a zero-width zone, which holds nothing.
+      const usable = !!g && g.r - g.l >= EDGE_TAB_MIN_PX;
+      const left = `${Math.round(usable && g ? g.l : 0)}px`;
+      const right = `${Math.round(usable && g ? W - g.r : W)}px`;
+      if (z.style.top !== top) { z.style.top = top; }
+      if (z.style.left !== left) { z.style.left = left; }
+      if (z.style.right !== right) { z.style.right = right; }
+    });
+    if (tl.clientWidth !== this._rowWidths['top-left'] || tr.clientWidth !== this._rowWidths['top-right']) {
+      this._layoutDock();
     }
   }
 
@@ -1649,9 +1870,17 @@ export class DockManager {
    the same strip as the feedback pill. The right zone's offset is adjusted at
    runtime to sit just left of the feedback pill (its width varies with the
    label) and never under the scroll region's scrollbar. */
-.ikm-dock-zone-bottom { position: fixed; bottom: 2px; z-index: ${DOCK_Z_INDEX}; display: flex; gap: 8px; align-items: center; }
-.ikm-dock-zone-bottom.ikm-dock-left { left: 20px; }
-.ikm-dock-zone-bottom.ikm-dock-right { right: 20px; flex-direction: row-reverse; }
+.ikm-dock-zone-row { position: fixed; left: 20px; right: 20px; height: 0; z-index: ${DOCK_Z_INDEX}; pointer-events: none; flex-direction: row; }
+.ikm-dock-zone-bottom { bottom: 2px; }
+.ikm-dock-zone-top { top: 0; }
+/* A row's two zones span the same strip; the host's layout pass places each
+   chip along it (flex-direction stays: code reads it for the corner order).
+   Bottom chips hang up from the row's line, top chips down from it. */
+.ikm-dock-zone-row.ikm-dock-right { flex-direction: row-reverse; }
+.ikm-dock-zone-row .ikm-dock-chip { position: absolute; left: 0; box-sizing: border-box; pointer-events: auto; overflow: hidden; }
+.ikm-dock-zone-bottom .ikm-dock-chip { bottom: 0; }
+.ikm-dock-zone-top .ikm-dock-chip { top: 0; }
+.ikm-dock-zone-row .ikm-dock-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ikm-dock-rail { position: fixed; top: 10%; bottom: 10%; width: 0; z-index: ${DOCK_Z_INDEX}; pointer-events: none; }
 .ikm-dock-rail.ikm-dock-left { left: 0; }
 .ikm-dock-rail.ikm-dock-right { right: 0; }
@@ -1722,10 +1951,14 @@ export class DockManager {
 /* Open (contract v1.4): the utility is on screen and its chip stays in the
    dock, like a taskbar button: a shade darker, with a white bar on the side
    that faces the screen edge (under a chip, outside a tab). */
-.ikm-dock-chip.ikm-dock-open, .ikm-dock-tab.ikm-dock-open { background: color-mix(in srgb, var(--ikm-dock-primary) 78%, #000); }
-.ikm-dock-chip.ikm-dock-open { box-shadow: inset 0 -3px 0 #fff; }
-.ikm-dock-zone-edge.ikm-dock-left .ikm-dock-tab.ikm-dock-open { box-shadow: inset 3px 0 0 #fff; }
-.ikm-dock-zone-edge.ikm-dock-right .ikm-dock-tab.ikm-dock-open { box-shadow: inset -3px 0 0 #fff; }
+/* The bar sits 2px inside the chip, framed by the chip's own colour: flush
+   with the edge it merged into a white page and showed only against the
+   blue suite bar, so it looked different depending on where the chip was. */
+.ikm-dock-chip.ikm-dock-open, .ikm-dock-tab.ikm-dock-open { --ikm-dock-open-bg: color-mix(in srgb, var(--ikm-dock-primary) 78%, #000); background: var(--ikm-dock-open-bg); }
+.ikm-dock-chip.ikm-dock-open { box-shadow: inset 0 0 0 2px var(--ikm-dock-open-bg), inset 0 -5px 0 #fff; }
+.ikm-dock-zone-top .ikm-dock-chip.ikm-dock-open { box-shadow: inset 0 0 0 2px var(--ikm-dock-open-bg), inset 0 5px 0 #fff; }
+.ikm-dock-zone-edge.ikm-dock-left .ikm-dock-tab.ikm-dock-open { box-shadow: inset 0 0 0 2px var(--ikm-dock-open-bg), inset 5px 0 0 #fff; }
+.ikm-dock-zone-edge.ikm-dock-right .ikm-dock-tab.ikm-dock-open { box-shadow: inset 0 0 0 2px var(--ikm-dock-open-bg), inset -5px 0 0 #fff; }
 .ikm-dock-chip:hover, .ikm-dock-tab:hover { transform: translateY(-1px); filter: brightness(1.1); }
 .ikm-dock-chip:focus-visible, .ikm-dock-tab:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .ikm-dock-icon { font-size: 12px; line-height: 1; }

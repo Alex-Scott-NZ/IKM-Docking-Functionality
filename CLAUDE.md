@@ -21,9 +21,15 @@ registration descriptors and arbitrates collisions.
 - All docking UI hides in edit mode. At 1024px wide and below, edge tabs fold
   into the bottom row (never hide them: a docked utility must stay reachable).
   An edge with more tabs than fit folds its least important ones there too.
-- Edge tabs are positioned by one layout pass per edge (`_placeTabs`): admin
-  clusters and readers' own spots (`edgePos`) together, overlaps pushed apart
-  evenly. Don't position an edge tab any other way.
+- Every chip and tab is positioned by the host's layout pass (`_layoutDock`):
+  one pass per edge (`_placeTabs`) and per row strip (`_placeRow`), admin
+  clusters and readers' own spots (`edgePos`, `rowPos`) together, overlaps
+  pushed apart evenly (`dockLayout.ts`). Don't position a chip any other way.
+- The top row is reader-only (not in the contract): it lives in the free gaps
+  of SharePoint's suite bar either side of the search box, measured at run
+  time (`_positionTopRow`); a gap too small for a chip folds into the bottom row.
+- The right edge starts below SharePoint's sticky command bar (`#spCommandBar`),
+  which renders after the host starts: keep `_watchCommandBar` in place.
 - One host per page: a second registration (tenant row + site catalog row)
   joins the running host via `window.__ikmDockingHost` and merges settings.
 - Before changing motion or layout, run TEST-PLAN.md's automated suite

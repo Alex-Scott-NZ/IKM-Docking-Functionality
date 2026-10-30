@@ -129,6 +129,8 @@ async function dragToZone(id, key, point) {
   await step(mid, dest, 20);
   await sleep(150);
   const seen = await ev(`[...document.querySelectorAll('[data-ikm-drop]')].map(e => e.getAttribute('data-ikm-drop') + (e.classList.contains('ikm-dock-drop-active') ? '*' : ''))`);
+  // Drop areas drawn over SharePoint's Share or Edit buttons (they must not be).
+  seen.overBar = await ev(`[...document.querySelectorAll('[data-ikm-drop]')].filter(d => { const a = d.getBoundingClientRect(); return [...document.querySelectorAll('[data-automation-id=pageCommandBarEditButton],[data-automation-id=shareButton]')].some(b => { const r = b.getBoundingClientRect(); return r.width > 0 && Math.min(a.right, r.right) - Math.max(a.left, r.left) > 1 && Math.min(a.bottom, r.bottom) - Math.max(a.top, r.top) > 1; }); }).map(d => d.getAttribute('data-ikm-drop'))`);
   await mouse('mouseReleased', dest.x, dest.y);
   await mouse('mouseMoved', 5, 5);
   return seen;
@@ -299,10 +301,14 @@ sc('move-zones', "Drag a reader's-choice chip to every area in turn, opening and
   await T.check('docked');
   const narrow = (await ev('innerWidth')) <= 1024;
   const offered = narrow ? ['bottom-left', 'bottom-right'] : ['bottom-left', 'bottom-right', 'edge-left', 'edge-right'];
+  // The top row's gaps in the suite bar are offered wherever they have room.
+  const maybe = ['top-left', 'top-right'];
   for (const key of narrow ? ['bottom-right', 'bottom-left'] : ['edge-right', 'edge-left', 'bottom-right', 'bottom-left']) {
     const seen = await T.dragToZone('zt-uc-a', key);
-    T.expect(`targets offered while dragging to ${key}`, offered.every((k) => seen.some((x) => x.startsWith(k))) && seen.length === offered.length, seen.join(' '));
+    const keys = seen.map((x) => x.replace('*', ''));
+    T.expect(`targets offered while dragging to ${key}`, offered.every((k) => keys.includes(k)) && keys.every((k) => offered.includes(k) || maybe.includes(k)), seen.join(' '));
     T.expect(`${key} lit while over it`, seen.includes(key + '*'), seen.join(' '));
+    T.expect('no drop area over Share or Edit', seen.overBar.length === 0, seen.overBar.join(' '));
     await T.check(`moved to ${key}`);
     T.expect(`zt-uc-a now in ${key}`, (await zoneOf('zt-uc-a')) === key, await zoneOf('zt-uc-a'));
     await T.click('zt-uc-a'); await T.check(`opened from ${key}`);
@@ -310,13 +316,13 @@ sc('move-zones', "Drag a reader's-choice chip to every area in turn, opening and
     T.expect(`zt-uc-a back in ${key}`, (await zoneOf('zt-uc-a')) === key, await zoneOf('zt-uc-a'));
   }
 });
-sc('move-remembered', 'A moved chip keeps its new place after a reload; moving it home forgets the choice', async (T) => {
+sc('move-remembered', 'A moved chip keeps its new place after a reload; moved home, it keeps the exact spot it was let go', async (T) => {
   await T.do('minimise zt-uc-a', "__dt.minimise('zt-uc-a')");
   await T.dragToZone('zt-uc-a', 'bottom-right'); await T.check('moved to bottom-right');
   await T.reload(); await T.do('minimise zt-uc-a after reload', "__dt.minimise('zt-uc-a')"); await T.check('after reload');
   T.expect('still bottom-right after reload', (await zoneOf('zt-uc-a')) === 'bottom-right', await zoneOf('zt-uc-a'));
   await T.dragToZone('zt-uc-a', 'bottom-left'); await T.check('moved home');
-  T.expect('choice forgotten once home', !(await ev("(JSON.parse(localStorage.getItem('ikm-dock:place') || '{}').places || {})['zt-uc-a']")), 'still stored');
+  T.expect('home, at the spot it was let go', typeof (await ev("((JSON.parse(localStorage.getItem('ikm-dock:place') || '{}').places || {})['zt-uc-a'] || {}).rowPos")) === 'number', 'no bottom spot stored');
 });
 sc('move-cancel', 'Let go of a reader\'s-choice chip on the page, away from every area', async (T) => {
   for (const id of ['zt-uc-a', 'zt-uc-b']) await T.do(`minimise ${id}`, `__dt.minimise('${id}')`);
@@ -394,6 +400,56 @@ sc('edge-collide', "Drop two reader's-choice tabs on the same spot, then one ont
   const f = await box('zt-el-a');
   await T.dragTo('zt-uc-b', { x, y: f.cy }); await T.check('dropped onto the fixed tab');
 }, 1025);
+sc('bottom-spot', "Drop a reader's-choice chip partway along the bottom row, then a second on the same spot: each stays where it was let go, the pair share the spot evenly, a fixed chip is pushed aside", async (T) => {
+  for (const id of ['zt-uc-a', 'zt-bl-a', 'zt-bl-b']) await T.do(`minimise ${id}`, `__dt.minimise('${id}')`);
+  const vw = await ev('innerWidth'), vh = await ev('innerHeight');
+  const y = vh - 17;
+  const x = Math.round(vw * 0.35);
+  await T.dragTo('zt-uc-a', { x, y }); await T.check('dropped 35% along the bottom row');
+  const cx = async (id) => { const c = await T.center(id); return c ? c.x : NaN; };
+  T.expect('centred where it was let go', Math.abs((await cx('zt-uc-a')) - x) <= 2, `${await cx('zt-uc-a')} vs ${x}`);
+  await T.reload(); await T.do('minimise zt-uc-a after reload', "__dt.minimise('zt-uc-a')"); await T.check('after reload');
+  T.expect('still there after a reload', Math.abs((await cx('zt-uc-a')) - x) <= 2, `${await cx('zt-uc-a')} vs ${x}`);
+  await T.do('minimise zt-uc-b', "__dt.minimise('zt-uc-b')");
+  await T.dragTo('zt-uc-b', { x, y }); await T.check('second chip dropped on the same spot');
+  const da = (await cx('zt-uc-a')) - x, db = (await cx('zt-uc-b')) - x;
+  T.expect('the pair share the spot', Math.sign(da) !== Math.sign(db) && Math.abs(Math.abs(da) - Math.abs(db)) <= 3, `offsets ${Math.round(da)} and ${Math.round(db)}`);
+  for (const id of ['zt-bl-a', 'zt-bl-b']) await T.do(`minimise ${id}`, `__dt.minimise('${id}')`);
+  const f = await T.center('zt-bl-a');
+  await T.dragTo('zt-uc-a', { x: f.x, y }); await T.check('dropped onto a fixed chip');
+});
+sc('top-row', "Drop reader's-choice chips into the suite bar's free space either side of the search box; they stay put, cover none of SharePoint's controls, and fold into the bottom row when a gap is too small", async (T) => {
+  for (const id of ['zt-uc-a', 'zt-uc-b']) await T.do(`minimise ${id}`, `__dt.minimise('${id}')`);
+  const gap = (k) => ev(`(() => { const r = document.querySelector('[data-ikm-zone="${k}"]').getBoundingClientRect(); return { l: r.left, r: r.right, w: r.width, y: r.top + 15 }; })()`);
+  // SharePoint collapses its suite bar to a thin strip on short windows (seen
+  // at 960x470, a few seconds after load): then there is no top row at all.
+  await T.wait(4000);
+  const tl = await gap('top-left'), tr = await gap('top-right');
+  if (tl.w < 40 || tr.w < 40) {
+    const seen = await T.dragToZone('zt-uc-a', 'page');
+    T.expect('no top area offered where the suite bar has no room', !seen.some((k) => (k.startsWith('top-left') && tl.w < 40) || (k.startsWith('top-right') && tr.w < 40)), seen.join(' '));
+    await T.check('suite bar without room for a top row');
+    return;
+  }
+  const x1 = Math.round(tl.l + tl.w * 0.6);
+  await T.dragTo('zt-uc-a', { x: x1, y: tl.y }); await T.check('dropped into the top left gap');
+  T.expect('zt-uc-a in top-left', (await zoneOf('zt-uc-a')) === 'top-left', await zoneOf('zt-uc-a'));
+  T.expect('centred where it was let go', Math.abs((await T.center('zt-uc-a')).x - x1) <= 2, `${(await T.center('zt-uc-a')).x} vs ${x1}`);
+  await T.dragTo('zt-uc-b', { x: Math.round(tr.l + tr.w / 2), y: tr.y }); await T.check('dropped into the top right gap');
+  T.expect('zt-uc-b in top-right', (await zoneOf('zt-uc-b')) === 'top-right', await zoneOf('zt-uc-b'));
+  await T.click('zt-uc-a'); await T.check('opened from the top row');
+  await T.do('minimise zt-uc-a', "__dt.minimise('zt-uc-a')"); await T.check('closed back into the top row');
+  await T.reload(); for (const id of ['zt-uc-a', 'zt-uc-b']) await T.do(`minimise ${id} after reload`, `__dt.minimise('${id}')`); await T.check('after reload');
+  T.expect('both still in the top row', (await zoneOf('zt-uc-a')) === 'top-left' && (await zoneOf('zt-uc-b')) === 'top-right', `${await zoneOf('zt-uc-a')} ${await zoneOf('zt-uc-b')}`);
+  await T.viewport(700, 600); await T.wait(500); await T.check('a 700px-wide window');
+  for (const id of ['zt-uc-a', 'zt-uc-b']) {
+    const z = await zoneOf(id);
+    const g = await gap(z && z.startsWith('top') ? z : 'top-left');
+    T.expect(`${id} in a top gap with room, or else the bottom row`, String(z).startsWith('bottom') || g.w >= 40, `${z}, gap ${Math.round(g.w)}px`);
+  }
+  await T.viewport(1920, 950); await T.wait(500); await T.check('back to 1920 wide');
+  T.expect('both back in the top row', (await zoneOf('zt-uc-a')) === 'top-left' && (await zoneOf('zt-uc-b')) === 'top-right', `${await zoneOf('zt-uc-a')} ${await zoneOf('zt-uc-b')}`);
+});
 sc('edge-overflow', 'More tabs than a short edge holds: the least important fold into the bottom row, and return when the window is taller', async (T) => {
   await T.viewport(1366, 330);
   const ids = ['zt-el-a', 'zt-el-b', 'zt-el-c', 'zt-elt-a', 'zt-elt-b', 'zt-uc-b'];
@@ -431,6 +487,7 @@ async function runCase(s, vpName) {
     async click(id, settleMs = 1) { await click(id); rec.steps.push(`click ${id}`); if (settleMs) { const ns = await settle(); if (ns) rec.failures.push({ at: `click ${id}`, v: [ns] }); } },
     async clickIfThere(id) { if (await ev(`!!__dt.center('${id}')`)) await click(id); rec.steps.push(`click ${id} again`); },
     async has(id) { return !!(await ev(`__dt.center('${id}')`)); },
+    async center(id) { return ev(`__dt.center('${id}')`); },
     async drag(id, onto, past) { await drag(id, onto, past); rec.steps.push(`drag ${id} -> ${onto}`); const ns = await settle(); if (ns) rec.failures.push({ at: `drag ${id}`, v: [ns] }); },
     async dragTo(id, point) { await dragTo(id, point); rec.steps.push(`drag ${id} to ${Math.round(point.x)},${Math.round(point.y)}`); const ns = await settle(); if (ns) rec.failures.push({ at: `drag ${id}`, v: [ns] }); },
     async dragToZone(id, key) { const seen = await dragToZone(id, key); rec.steps.push(`drag ${id} to ${key}`); const ns = await settle(); if (ns) rec.failures.push({ at: `drag ${id} to ${key}`, v: [ns] }); return seen; },
